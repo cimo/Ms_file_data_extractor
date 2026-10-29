@@ -152,9 +152,7 @@ class Ocr:
     def boxDetect(self, image):
         return self.detection.execute(image)
 
-    def execute(self, image, tableList, countStart, numberPage, pathOutput):
-        detectionList = self.detection.execute(image)
-
+    def execute(self, image, detectionList, tableList, countStart, numberPage, pathOutput):
         imageInk = imageInkBuild(image)
 
         isVertical = self._verticalCheck(detectionList)

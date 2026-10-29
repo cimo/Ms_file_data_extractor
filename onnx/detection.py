@@ -147,7 +147,7 @@ class Detection:
     def __init__(self):
         self.pathModel = f"{os.path.dirname(__file__)}/model/pp-ocrV6_medium_det.onnx"
 
-        self.limitSideLength = 960
+        self.limitSideLength = 2000
         self.limitSideLengthMax = 4000
         self.binaryThreshold = 0.2
         self.boxThreshold = 0.45

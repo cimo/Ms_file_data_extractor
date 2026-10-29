@@ -189,11 +189,11 @@ export default class Service {
 
                 delete this.jobObject[uniqueId];
 
-                const fileOrFolderDeleteOutput = await helperSrc.fileOrFolderDelete(pathOutput);
+                /*const fileOrFolderDeleteOutput = await helperSrc.fileOrFolderDelete(pathOutput);
 
                 if (typeof fileOrFolderDeleteOutput !== "boolean") {
                     helperSrc.writeLog("Service.ts - api() - post(/api/extract-check) - fileOrFolderDelete()", fileOrFolderDeleteOutput.toString());
-                }
+                }*/
             } else {
                 helperSrc.responseBody({ state: job.state, message: job.message }, response, job.isError ? 500 : 200);
 
