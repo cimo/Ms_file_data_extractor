@@ -12,6 +12,7 @@ import layout
 import table
 import ocr
 import form
+import watermark
 import raster
 import office
 import markdown
@@ -122,13 +123,14 @@ class Engine:
 
         self.extensionObject = self._extensionAllowed()
 
-        self.debugNameList = ["layout", "table", "ocr", "page"]
+        self.debugNameList = ["layout", "table", "ocr", "page", "watermark"]
 
         self.layout = layout.Layout(self.isDebug)
         self.table = table.Table(self.isDebug)
         self.ocr = ocr.Ocr(self.isDebug)
         self.form = form.Form()
-        self.raster = raster.Raster(self.isDebug, self.layout, self.table, self.ocr, self.form)
+        self.watermark = watermark.Watermark()
+        self.raster = raster.Raster(self.isDebug, self.layout, self.table, self.ocr, self.form, self.watermark)
         self.office = office.Office(self.isDebug)
         self.markdown = markdown.Markdown(self.extensionObject, self.office)
 

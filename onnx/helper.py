@@ -56,10 +56,10 @@ def tensorNormalize(image, meanList, standardList):
 
     return numpy.expand_dims(tensor.transpose((2, 0, 1)), axis=0).astype(numpy.float32)
 
-def detrDetect(imageRgb, imageSize, onnxSession):
+def detrDetect(imageRgb, imageSize, interpolation, onnxSession):
     imageHeight, imageWidth = imageRgb.shape[0:2]
 
-    imageResized = cv2.resize(imageRgb, (imageSize, imageSize), interpolation=cv2.INTER_CUBIC).astype(numpy.float32) / 255.0
+    imageResized = cv2.resize(imageRgb, (imageSize, imageSize), interpolation=interpolation).astype(numpy.float32) / 255.0
 
     tensorFeedObject = {
         "image": numpy.expand_dims(imageResized.transpose((2, 0, 1)), axis=0).astype(numpy.float32),

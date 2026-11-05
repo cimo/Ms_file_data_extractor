@@ -11,7 +11,7 @@ from helper import onnxSessionBuild, detrDetect, centerPointCalculate, boxArea, 
 
 class Layout:
     def _detect(self, image):
-        detectionList = detrDetect(cv2.cvtColor(image, cv2.COLOR_BGR2RGB), self.imageSizeLayout, self.onnxSessionLayout)
+        detectionList = detrDetect(cv2.cvtColor(image, cv2.COLOR_BGR2RGB), self.imageSizeLayout, cv2.INTER_CUBIC, self.onnxSessionLayout)
 
         resultList = []
 

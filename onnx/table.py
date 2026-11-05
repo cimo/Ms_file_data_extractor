@@ -20,12 +20,23 @@ class Table:
 
         return resultList
 
+    def _interpolationChoose(self, imageRgb, width, height, interpolationEnlarge):
+        imageHeight, imageWidth = imageRgb.shape[0:2]
+
+        if width * height < imageWidth * imageHeight:
+            return cv2.INTER_AREA
+
+        return interpolationEnlarge
+
     def _typeClassify(self, imageRgb):
         imageHeight, imageWidth = imageRgb.shape[0:2]
 
         ratio = self.imageSizeShort / float(min(imageHeight, imageWidth))
 
-        imageResized = cv2.resize(imageRgb, (int(round(imageWidth * ratio)), int(round(imageHeight * ratio))))
+        width = int(round(imageWidth * ratio))
+        height = int(round(imageHeight * ratio))
+
+        imageResized = cv2.resize(imageRgb, (width, height), interpolation=self._interpolationChoose(imageRgb, width, height, cv2.INTER_LINEAR))
 
         resizedHeight, resizedWidth = imageResized.shape[0:2]
 
@@ -50,7 +61,7 @@ class Table:
     def _cellDetect(self, imageRgb, tableType):
         onnxSessionCell = self.onnxSessionCellWired if tableType == "wired" else self.onnxSessionCellWireless
 
-        detectionList = detrDetect(imageRgb, self.imageSizeCell, onnxSessionCell)
+        detectionList = detrDetect(imageRgb, self.imageSizeCell, self._interpolationChoose(imageRgb, self.imageSizeCell, self.imageSizeCell, cv2.INTER_CUBIC), onnxSessionCell)
 
         scoreThreshold = self.scoreThresholdCellWired if tableType == "wired" else self.scoreThresholdCellWireless
 
@@ -716,7 +727,7 @@ class Table:
         self.levelBoxContained = 0.9
         self.levelBoxNms = 0.5
         self.levelBoxOverlap = 0.7
-        self.levelCoverageArea = 0.005
+        self.levelCoverageArea = 0.002
         self.levelCoverageKernel = 0.4
         self.levelCoverageSize = 0.4
         self.levelMarginCoverage = 0.02

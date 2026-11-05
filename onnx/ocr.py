@@ -152,36 +152,57 @@ class Ocr:
     def boxDetect(self, image):
         return self.detection.execute(image)
 
-    def execute(self, image, detectionList, tableList, countStart, numberPage, pathOutput):
+    def _quadRecognize(self, image, detectionList, tableList, isVertical):
         imageInk = imageInkBuild(image)
 
-        isVertical = self._verticalCheck(detectionList)
-
         quadPageList = []
+        indexList = []
 
         for a in range(len(detectionList)):
             quadList = self._quadSplit(detectionList[a]["coordinate"], self._edgeInsideCollect(tableList, detectionList[a]["coordinate"], imageInk, isVertical), isVertical)
 
             for b in range(len(quadList)):
                 quadPageList.append(quadList[b])
+                indexList.append(a)
 
         recognitionList = self.recognition.execute(quadPageList, image)
+
+        resultList = []
+
+        for a in range(len(quadPageList)):
+            resultList.append({"quad": quadPageList[a], "text": recognitionList[a]["text"], "index": indexList[a], "key": (detectionList[indexList[a]]["coordinate"][0][1], detectionList[indexList[a]]["coordinate"][0][0])})
+
+        return resultList
+
+    def execute(self, detectionList, image, tableList, watermarkObject, countStart, numberPage, pathOutput):
+        isVertical = self._verticalCheck(detectionList)
+
+        quadPageList = self._quadRecognize(image, detectionList, tableList, isVertical)
+
+        if watermarkObject["isFound"]:
+            quadKeepList = []
+
+            for a in range(len(quadPageList)):
+                if watermarkObject["isKeepList"][quadPageList[a]["index"]]:
+                    quadKeepList.append(quadPageList[a])
+
+            quadPageList = sorted(quadKeepList + self._quadRecognize(watermarkObject["image"], watermarkObject["detectionZoneList"], tableList, isVertical), key=lambda item: item["key"])
 
         itemList = []
         coordinateItemList = []
 
         for a in range(len(quadPageList)):
-            if len(recognitionList[a]["text"].strip()) == 0:
+            if len(quadPageList[a]["text"].strip()) == 0:
                 continue
 
-            coordinateList = boxFromPointList(quadPageList[a])
+            coordinateList = boxFromPointList(quadPageList[a]["quad"])
 
             itemList.append({
                 "id": countStart + len(itemList) + 1,
                 "page": numberPage,
                 "bbox": [int(round(coordinateList[0])), int(round(coordinateList[1])), int(round(coordinateList[2])), int(round(coordinateList[3]))],
                 "centerPoint": centerPointCalculate(coordinateList),
-                "text": recognitionList[a]["text"]
+                "text": quadPageList[a]["text"]
             })
 
             coordinateItemList.append(itemList[len(itemList) - 1]["bbox"])
