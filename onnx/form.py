@@ -4115,6 +4115,57 @@ class Form:
 
         return len(set(indexList)) == 1
 
+    def _keyWallCrossCheck(self, keyList, lineList, height):
+        for a in range(len(keyList)):
+            bboxList = keyList[a]["bbox"]
+
+            centerY = (bboxList[1] + bboxList[3]) / 2
+
+            if self._wallCheck(lineList, bboxList[0] + height * self.levelMargin, bboxList[2] - height * self.levelMargin, [bboxList[0], centerY - height / 2, bboxList[2], centerY + height / 2]):
+                return True
+
+        return False
+
+    def _cellFilledCount(self, wallList, itemList, bandList):
+        count = 0
+
+        for a in range(len(wallList)):
+            for b in range(len(itemList)):
+                bboxList = itemList[b]["bbox"]
+
+                centerX = (bboxList[0] + bboxList[2]) / 2
+                centerY = (bboxList[1] + bboxList[3]) / 2
+
+                if centerX > wallList[a] and (a == len(wallList) - 1 or centerX < wallList[a + 1]) and centerY > bandList[0] and centerY < bandList[1]:
+                    count += 1
+
+                    break
+
+        return count
+
+    def _segmentLabelRowCheck(self, segment, lineList, height, horizontalList, itemList):
+        if self._keyWallCrossCheck(segment[0]["itemList"], lineList, height) == False:
+            return False
+
+        bboxKeyList = segment[0]["itemList"][0]["bbox"]
+
+        centerY = (bboxKeyList[1] + bboxKeyList[3]) / 2
+
+        bandList = self._bandFind([bboxKeyList[0], centerY, bboxKeyList[0] + height, centerY], horizontalList)
+
+        if bandList == None:
+            return False
+
+        wallList = []
+
+        for a in range(len(lineList)):
+            if lineList[a][1] <= bandList[0] + height * self.levelMargin and lineList[a][3] >= bandList[1] + height and lineList[a][0] >= bboxKeyList[0]:
+                wallList.append((lineList[a][0] + lineList[a][2]) / 2)
+
+        wallList.sort()
+
+        return self._cellFilledCount(wallList, itemList, bandList) >= self.countLabelRowCell
+
     def _segmentWallCheck(self, segment, lineList, height):
         if len(lineList) == 0:
             return True
@@ -4227,7 +4278,7 @@ class Form:
                     if self._symbolCheck(self._textClean("".join(self._columnText(segment[c])))):
                         isSymbol = True
 
-                if len(segment) < 2 or isShort or isSymbol or self._segmentFreeCheck(segment) or self._segmentCaptionCheck(segment, itemList, height, horizontalList) or len(keyText) <= self.countUnitMaximum or self._segmentWallCheck(segment, lineList, height) == False:
+                if len(segment) < 2 or isShort or isSymbol or self._segmentFreeCheck(segment) or self._segmentCaptionCheck(segment, itemList, height, horizontalList) or len(keyText) <= self.countUnitMaximum or self._segmentLabelRowCheck(segment, lineList, height, horizontalList, itemList) or self._segmentWallCheck(segment, lineList, height) == False:
                     lineTextList = []
 
                     bboxLineList = None
@@ -5822,6 +5873,7 @@ class Form:
         self.levelCellReach = 2.0
         self.countCellRow = 2
         self.countCellHeaderRow = 3
+        self.countLabelRowCell = 3
         self.levelCellHeaderBand = 1.5
         self.levelSpeckWidth = 0.1
         self.levelSpeckSide = 0.3
