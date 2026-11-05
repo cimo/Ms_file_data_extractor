@@ -435,8 +435,54 @@ class Table:
 
         return sorted(resultList, key=lambda lineObject: lineObject["cross1"])
 
-    def _textJoin(self, textList, cellCoordinateList, directionObject):
-        textSortedList = sorted(self._textInsideCollect(textList, cellCoordinateList), key=lambda textObject: self._textOrderKey(textObject, directionObject))
+    def _textOrphanAssign(self, textList, cellList):
+        resultObject = {}
+
+        for a in range(len(textList)):
+            coordinateList = textList[a]["coordinate"]
+
+            centerX = (coordinateList[0] + coordinateList[2]) / 2
+            centerY = (coordinateList[1] + coordinateList[3]) / 2
+
+            indexBest = -1
+            distanceBest = -1
+
+            isInside = False
+
+            for b in range(len(cellList)):
+                coordinateCellList = cellList[b]["coordinate"]
+
+                if centerX >= coordinateCellList[0] and centerX <= coordinateCellList[2] and centerY >= coordinateCellList[1] and centerY <= coordinateCellList[3]:
+                    isInside = True
+
+                    break
+
+                if centerY < coordinateCellList[1] or centerY > coordinateCellList[3]:
+                    continue
+
+                distance = max(coordinateCellList[0] - coordinateList[2], coordinateList[0] - coordinateCellList[2], 0)
+
+                overlap = min(coordinateList[2], coordinateCellList[2]) - max(coordinateList[0], coordinateCellList[0])
+
+                if overlap > 0:
+                    distance = -overlap
+
+                if indexBest < 0 or distance < distanceBest:
+                    indexBest = b
+                    distanceBest = distance
+
+            if isInside or indexBest < 0:
+                continue
+
+            if indexBest not in resultObject:
+                resultObject[indexBest] = []
+
+            resultObject[indexBest].append(textList[a])
+
+        return resultObject
+
+    def _textJoin(self, textList, directionObject):
+        textSortedList = sorted(textList, key=lambda textObject: self._textOrderKey(textObject, directionObject))
 
         result = ""
 
@@ -572,8 +618,10 @@ class Table:
 
             cellList = tableList[a]["cellList"]
 
+            orphanObject = self._textOrphanAssign(textList, cellList)
+
             for b in range(len(cellList)):
-                cellList[b]["text"] = self._textJoin(textList, cellList[b]["coordinate"], directionObject)
+                cellList[b]["text"] = self._textJoin(self._textInsideCollect(textList, cellList[b]["coordinate"]) + orphanObject.get(b, []), directionObject)
 
             tableList[a]["cellList"] = self._rowEmptyRemove(cellList)
 

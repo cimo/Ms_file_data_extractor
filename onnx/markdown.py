@@ -58,6 +58,14 @@ class Markdown:
 
         return resultList
 
+    def _gridPut(self, gridList, rowIndex, columnIndex, text):
+        current = gridList[rowIndex][columnIndex]
+
+        if current == self.textCellEmpty or current in text:
+            gridList[rowIndex][columnIndex] = text
+        elif text not in current:
+            gridList[rowIndex][columnIndex] = f"{current} {text}"
+
     def _cellEscape(self, text):
         return self._textEscape(text.replace(self.separatorCell, self.separatorCellEscaped).replace(self.separatorLine, self.separatorText).strip())
 
@@ -327,7 +335,7 @@ class Markdown:
                 if cellList[a]["rowSpan"] > 1:
                     rowIndex = self._rowIndexAnchor(cellList[a], itemList, tableObject["page"], rowRangeObject)
 
-                gridList[rowIndex][cellList[a]["columnIndex"]] = text
+                self.markdown._gridPut(gridList, rowIndex, cellList[a]["columnIndex"], text)
 
             directionPageObject = directionObject[tableObject["page"]]
 
@@ -627,7 +635,7 @@ class Markdown:
                 if len(text) == 0:
                     continue
 
-                resultList[cellList[a]["rowIndex"]][cellList[a]["columnIndex"]] = text
+                self.markdown._gridPut(resultList, cellList[a]["rowIndex"], cellList[a]["columnIndex"], text)
 
             return resultList
 

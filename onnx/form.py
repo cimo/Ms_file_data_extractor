@@ -924,6 +924,15 @@ class Form:
 
         return countAlign < 2
 
+    def _numberSeparatorCheck(self, itemObject, itemOtherObject):
+        text = self._textClean(itemObject["text"])
+        textOther = self._textClean(itemOtherObject["text"])
+
+        if len(text) < 2 or len(textOther) == 0 or unicodedata.category(text[-1]) != "Po" or unicodedata.category(text[0]) != "Nd" or unicodedata.category(textOther[0]) != "Nd":
+            return False
+
+        return self._letterContain(text) == False and self._letterContain(textOther) == False
+
     def _cellRunSplit(self, runList, itemList, lineObject, height):
         if len(runList) < 2:
             return [runList]
@@ -958,11 +967,16 @@ class Form:
             if isJoin == False and len(runList) == 2:
                 isJoin = isLetter
 
+            isSeparator = self._numberSeparatorCheck(runList[a - 1], runList[a]) and gap <= heightLocal * self.levelSeparatorGap
+
+            if isSeparator:
+                isJoin = True
+
             for b in [a - 1, a]:
-                if isJoin and self._bareNumberCheck(self._textClean(runList[b]["text"])) and self._numberJoinCheck(runList, b) == False:
+                if isJoin and isSeparator == False and self._bareNumberCheck(self._textClean(runList[b]["text"])) and self._numberJoinCheck(runList, b) == False:
                     isJoin = False
 
-            if isJoin and self._gutterCheck(itemList, runList, a, lineObject, height):
+            if isJoin and isSeparator == False and self._gutterCheck(itemList, runList, a, lineObject, height):
                 isJoin = False
 
             if isJoin:
@@ -1754,33 +1768,97 @@ class Form:
 
         return False
 
+    def _wallLongCheck(self, bboxList, lineList, start, end, height):
+        centerY = (bboxList[1] + bboxList[3]) / 2
+
+        for a in range(len(lineList)):
+            if lineList[a][2] <= start or lineList[a][0] >= end or lineList[a][3] - lineList[a][1] < height * self.levelWallCutLength or lineList[a][2] - lineList[a][0] > height * self.levelLineWidth:
+                continue
+
+            if lineList[a][1] <= centerY and lineList[a][3] >= centerY:
+                return True
+
+        return False
+
+    def _wallCutFind(self, charList, index, wallList, centerY, height):
+        centerLeft = (charList[index - 1]["start"] + charList[index - 1]["end"]) / 2
+        centerRight = (charList[index]["start"] + charList[index]["end"]) / 2
+
+        for a in range(len(wallList)):
+            if wallList[a][0] > centerLeft and wallList[a][2] < centerRight and wallList[a][1] <= centerY - height / 2 and wallList[a][3] >= centerY + height / 2:
+                return wallList[a]
+
+        return None
+
     def _itemWallSplit(self, itemList, verticalList):
+        height = self._heightMedian(itemList)
+
+        wallList = []
+
+        for a in range(len(verticalList)):
+            if verticalList[a][3] - verticalList[a][1] >= height * self.levelWallCutLength and verticalList[a][2] - verticalList[a][0] <= height * self.levelLineWidth:
+                wallList.append(verticalList[a])
+
         resultList = []
+
+        indexPart = 0
 
         for a in range(len(itemList)):
             itemObject = itemList[a]
 
-            charList = itemObject["charList"]
+            charList = itemObject["charList"] if len(itemObject["charList"]) > 0 else itemObject.get("charPositionList", [])
 
-            if itemObject["isVertical"] or len(charList) != len(itemObject["text"]) or self._letterContain(itemObject["text"]) == False:
+            text = ""
+
+            for b in range(len(charList)):
+                text += charList[b]["text"]
+
+            if itemObject["isVertical"] or self._textClean(text) != self._textClean(itemObject["text"]) or self._letterContain(itemObject["text"]) == False:
                 resultList.append(itemObject)
 
                 continue
 
+            bboxList = itemObject["bbox"]
+
+            centerY = (bboxList[1] + bboxList[3]) / 2
+
             indexStart = 0
 
+            left = bboxList[0]
+
+            partList = []
+
             for b in range(1, len(charList) + 1):
-                if b < len(charList) and (unicodedata.category(charList[b - 1]["text"]) != "Zs" or self._wallCount(verticalList, charList[b - 1]["start"], charList[b]["end"], itemObject["bbox"]) == 0):
-                    continue
+                wallObject = None
+
+                if b < len(charList):
+                    wallObject = self._wallCutFind(charList, b, wallList, centerY, height)
+
+                    if wallObject == None or self._letterContain(text[indexStart:b]) == False or self._letterContain(text[b:]) == False:
+                        continue
 
                 partObject = dict(itemObject)
-                partObject["text"] = itemObject["text"][indexStart:b]
-                partObject["charList"] = charList[indexStart:b]
-                partObject["bbox"] = [charList[indexStart]["start"], itemObject["bbox"][1], charList[b - 1]["end"], itemObject["bbox"][3]]
+                partObject["text"] = text[indexStart:b]
+                partObject["charList"] = charList[indexStart:b] if len(itemObject["charList"]) > 0 else []
+                partObject["charPositionList"] = charList[indexStart:b]
+                partObject["bbox"] = [left, max(bboxList[1], centerY - height * self.levelWallCutHeight), bboxList[2] if b == len(charList) else wallObject[0], min(bboxList[3], centerY + height * self.levelWallCutHeight)]
 
-                resultList.append(partObject)
+                if len(partList) > 0 and "detectionIndex" in itemObject:
+                    indexPart += 1
+
+                    partObject["detectionIndex"] = -self.countPartIndex - indexPart
+
+                partList.append(partObject)
 
                 indexStart = b
+
+                if wallObject != None:
+                    left = wallObject[2]
+
+            if len(partList) == 1:
+                resultList.append(itemObject)
+            else:
+                resultList = resultList + partList
 
         return resultList
 
@@ -2129,7 +2207,7 @@ class Form:
 
                     continue
 
-                if len(runList) >= self.countRowMinimum:
+                if len(runList) >= self.countRowMinimum and len(columnItemList) >= self.countRowColumn:
                     for c in range(len(runList)):
                         runList[c]["type"] = "row"
                         runList[c]["text"] = str(self._digitValue(self._textClean(runList[c]["text"])))
@@ -2334,6 +2412,9 @@ class Form:
 
                 if isUnit and isNumber == False and self._wallCount(verticalList, lastObject["bbox"][2] - height * self.levelMargin, nextObject["bbox"][0] + height * self.levelMargin, bboxSpanList) > 1:
                     isUnit = False
+
+                if self._wallLongCheck(bboxSpanList, verticalList, lastObject["bbox"][2] - height * self.levelMargin, nextObject["bbox"][0] + height * self.levelMargin, height):
+                    continue
 
                 if ((isNumber and gap <= heightPair * self.levelComposeGap) or isUnit or isSymbol) and isColumn == False:
                     chainList.append(nextObject)
@@ -2827,6 +2908,86 @@ class Form:
             text += rightList[a]["text"]
 
         return {"text": text, "bbox": bboxList}
+
+    def _stackSparseMember(self, itemObject, lineList, horizontalList, itemList):
+        bboxList = itemObject["bbox"]
+
+        centerX = (bboxList[0] + bboxList[2]) / 2
+
+        left = None
+        right = None
+
+        for a in range(len(lineList)):
+            bboxLineList = lineList[a]
+
+            if self._overlap(bboxLineList[1], bboxLineList[3], bboxList[1], bboxList[3]) < (bboxList[3] - bboxList[1]) * self.levelLineCover:
+                continue
+
+            if bboxLineList[2] <= centerX and (left == None or bboxLineList[2] > left):
+                left = bboxLineList[2]
+
+            if bboxLineList[0] >= centerX and (right == None or bboxLineList[0] < right):
+                right = bboxLineList[0]
+
+        bandList = self._bandFind(bboxList, horizontalList)
+
+        if left == None or right == None or bandList == None:
+            return []
+
+        resultList = []
+
+        for a in range(len(itemList)):
+            bboxOtherList = itemList[a]["bbox"]
+
+            centerOtherX = (bboxOtherList[0] + bboxOtherList[2]) / 2
+            centerOtherY = (bboxOtherList[1] + bboxOtherList[3]) / 2
+
+            if centerOtherX <= left or centerOtherX >= right or centerOtherY <= bandList[0] or centerOtherY >= bandList[1]:
+                continue
+
+            if len(self._textClean(itemList[a]["text"])) != 1 or self._letterContain(itemList[a]["text"]) == False:
+                return []
+
+            resultList.append(itemList[a])
+
+        return sorted(resultList, key=lambda memberObject: memberObject["bbox"][1])
+
+    def _stackSparseCollect(self, itemList, lineObject, verticalList):
+        height = self._heightMedian(itemList)
+
+        usedList = []
+
+        for a in range(len(itemList)):
+            text = self._textClean(itemList[a]["text"])
+
+            if itemList[a] in usedList or itemList[a].get("isVertical") or len(text) != 1 or self._letterContain(text) == False:
+                continue
+
+            memberList = self._stackSparseMember(itemList[a], lineObject["verticalList"], lineObject["horizontalList"], itemList)
+
+            if len(memberList) < self.countSparseMinimum:
+                continue
+
+            isSparse = True
+
+            for b in range(1, len(memberList)):
+                if memberList[b]["bbox"][1] - memberList[b - 1]["bbox"][3] < height * self.levelSparseGap:
+                    isSparse = False
+
+            if isSparse == False:
+                continue
+
+            verticalList.append(self._stackTitleBuild(memberList))
+
+            usedList = usedList + memberList
+
+        resultList = []
+
+        for a in range(len(itemList)):
+            if itemList[a] not in usedList:
+                resultList.append(itemList[a])
+
+        return resultList
 
     def _stackTitleCollect(self, itemList, lineObject, verticalList):
         usedList = []
@@ -3826,6 +3987,7 @@ class Form:
 
         pairList.append({
             "y": bboxKeyList[1],
+            "bbox": bboxKeyList,
             "section": sectionList[0]["text"] if len(sectionList) > 0 else "",
             "group": " / ".join(groupList),
             "sectionList": sectionList,
@@ -3870,7 +4032,7 @@ class Form:
                     matchList = [{"keyList": keyList, "memberList": memberList}]
 
                 for a in range(len(matchList)):
-                    if self._cellCenterCheck(matchList[a]["memberList"], cellOther, height) or self._cellEnclosedCheck(matchList[a]["memberList"]):
+                    if self._cellCenterCheck(matchList[a]["memberList"], cellOther, height) or self._cellEnclosedCheck(matchList[a]["memberList"]) or self._segmentLabelPairCheck([{"itemList": matchList[a]["keyList"]}, {"itemList": matchList[a]["memberList"]}], lineObject["verticalList"], height, itemList):
                         continue
 
                     self._cellPairAppend(matchList[a]["keyList"], matchList[a]["memberList"], height, verticalList, lineObject, pairList)
@@ -3890,7 +4052,16 @@ class Form:
     def _cellProbe(self, bboxList, height, lineObject):
         centerY = (bboxList[1] + bboxList[3]) / 2
 
-        return self._cellFind([bboxList[0], centerY - height / 2, bboxList[0] + height, centerY + height / 2], lineObject)
+        bandList = self._bandFind([bboxList[0], centerY, bboxList[0] + height, centerY], lineObject["horizontalList"])
+
+        top = centerY - height / 2
+        bottom = centerY + height / 2
+
+        if bandList != None:
+            top = max(top, bandList[0])
+            bottom = min(bottom, bandList[1])
+
+        return self._cellFind([bboxList[0], top, bboxList[0] + height, bottom], lineObject)
 
     def _cellMemberMerge(self, memberList):
         lineList = self._cellLineGroup(sorted(memberList, key=lambda itemObject: itemObject["bbox"][1]))
@@ -3901,6 +4072,9 @@ class Form:
 
         for a in range(len(lineList)):
             for b in range(len(lineList[a])):
+                if lineList[a][b].get("isMark"):
+                    text += f"{self.textMark} "
+
                 text += self._textClean(lineList[a][b]["text"])
 
                 bboxList = self._bboxExpand(bboxList, lineList[a][b]["bbox"])
@@ -3975,6 +4149,133 @@ class Form:
             for b in range(len(pairList[a]["sectionList"])):
                 if pairList[a]["sectionList"][b] not in sectionUsedList:
                     sectionUsedList.append(pairList[a]["sectionList"][b])
+
+    def _pairBboxFind(self, pairObject):
+        if "bbox" in pairObject:
+            return pairObject["bbox"]
+
+        return pairObject["anchor"]["bbox"]
+
+    def _pairRowBandList(self, pairList, horizontalList):
+        resultList = []
+
+        for a in range(len(pairList)):
+            if pairList[a]["row"] == "" or pairList[a]["key"] == "" or self._numberValue(self._textClean(pairList[a]["row"])) < 0 or "anchor" not in pairList[a]:
+                continue
+
+            rowObject = self._rowFind(pairList[a]["keyList"], pairList[a]["anchor"])
+
+            if rowObject == None:
+                continue
+
+            bandList = self._bandFind(rowObject["bbox"], horizontalList)
+
+            if bandList != None:
+                resultList.append({"pair": pairList[a], "band": bandList, "right": rowObject["bbox"][2]})
+
+        return resultList
+
+    def _pairCaptionSplit(self, pairObject, text, height, outsideLineList, numberPage):
+        if "anchor" not in pairObject:
+            return text
+
+        textList = []
+
+        for a in range(len(pairObject["keyList"])):
+            keyObject = pairObject["keyList"][a]
+
+            if len(self._textClean(keyObject["text"])) <= self.countUnitMaximum and keyObject["bbox"][3] <= pairObject["anchor"]["bbox"][1] + height * self.levelCaptionOverlap:
+                outsideLineList.append({"text": keyObject["text"].strip(), "bbox": list(keyObject["bbox"]), "page": numberPage})
+            elif keyObject["type"] != "row":
+                textList.append(keyObject["text"].strip())
+
+        textList.append(pairObject["value"])
+
+        return " ".join(textList).strip()
+
+    def _pairEnclosedCheck(self, pairObject):
+        text = self._textClean(pairObject["key"])
+
+        return len(text) == 1 and unicodedata.category(text) == "No"
+
+    def _tableBoundaryCheck(self, bboxList, verticalList, left, height):
+        centerY = (bboxList[1] + bboxList[3]) / 2
+
+        positionList = []
+
+        for a in range(len(verticalList)):
+            center = (verticalList[a][0] + verticalList[a][2]) / 2
+
+            if center > left and center < bboxList[0] and verticalList[a][1] <= centerY and verticalList[a][3] >= centerY and verticalList[a][3] - verticalList[a][1] >= height * self.levelWallCutLength:
+                positionList.append(center)
+
+        positionList.sort()
+
+        for a in range(1, len(positionList)):
+            if positionList[a] - positionList[a - 1] > height * self.levelMargin and positionList[a] - positionList[a - 1] <= height * self.levelTableDouble:
+                return True
+
+        return False
+
+    def _pairRowAttach(self, pairList, horizontalList, outsideLineList, numberPage, height, verticalList):
+        rowBandList = self._pairRowBandList(pairList, horizontalList)
+
+        resultList = []
+
+        for a in range(len(pairList)):
+            pairObject = pairList[a]
+
+            if pairObject["row"] != "":
+                resultList.append(pairObject)
+
+                continue
+
+            bboxList = self._pairBboxFind(pairObject)
+
+            if self._pairEnclosedCheck(pairObject):
+                outsideLineList.append({"text": f"{pairObject['key']} {pairObject['value']}", "bbox": list(bboxList), "page": numberPage})
+
+                continue
+
+            if len(self._textClean(pairObject["key"])) > self.countAttachKey:
+                resultList.append(pairObject)
+
+                continue
+
+            bandList = self._bandFind([bboxList[0], (bboxList[1] + bboxList[3]) / 2, bboxList[2], (bboxList[1] + bboxList[3]) / 2], horizontalList)
+
+            bandBest = None
+
+            for b in range(len(rowBandList)):
+                if bandList != None and bandList[0] >= rowBandList[b]["band"][0] - height * self.levelBandSame and bandList[1] <= rowBandList[b]["band"][1] + height * self.levelBandSame and bboxList[0] >= rowBandList[b]["right"] and self._tableBoundaryCheck(bboxList, verticalList, rowBandList[b]["right"], height) == False and (bandBest == None or rowBandList[b]["right"] > bandBest["right"]):
+                    bandBest = rowBandList[b]
+
+            if bandBest == None:
+                resultList.append(pairObject)
+
+                continue
+
+            if "attachList" not in bandBest:
+                bandBest["attachList"] = []
+
+            text = f"{pairObject['key']} {pairObject['value']}".strip()
+
+            bandBest["attachList"].append({"text": self._pairCaptionSplit(pairObject, text, height, outsideLineList, numberPage), "left": bboxList[0]})
+
+        for a in range(len(rowBandList)):
+            attachList = sorted(rowBandList[a].get("attachList", []), key=lambda attachObject: attachObject["left"])
+
+            textList = []
+
+            if rowBandList[a]["pair"]["value"] != "":
+                textList.append(rowBandList[a]["pair"]["value"])
+
+            for b in range(len(attachList)):
+                textList.append(attachList[b]["text"])
+
+            rowBandList[a]["pair"]["value"] = " / ".join(textList)
+
+        return resultList
 
     def _cellHeaderRowCount(self, cellObject, cell, margin):
         count = 0
@@ -4067,6 +4368,231 @@ class Form:
 
         return usedList
 
+    def _wallThroughCheck(self, height, lineList, position, cell):
+        margin = height * self.levelMargin
+
+        for a in range(len(lineList)):
+            if abs((lineList[a][0] + lineList[a][2]) / 2 - position) <= margin and lineList[a][1] <= cell[2] - height and lineList[a][3] >= cell[3] + height:
+                return True
+
+        return False
+
+    def _cellVerticalCheck(self, memberList):
+        lineList = self._cellLineGroup(sorted(memberList, key=lambda itemObject: itemObject["bbox"][1]))
+
+        if len(lineList) <= self.countCellRow:
+            return False
+
+        for a in range(len(lineList)):
+            text = ""
+
+            for b in range(len(lineList[a])):
+                text += self._textClean(lineList[a][b]["text"])
+
+            if len(text) > self.countUnitMaximum:
+                return False
+
+        return True
+
+    def _valueKeyFirstCheck(self, valueList, cellObject):
+        if len(valueList) < 2:
+            return False
+
+        if len(self._textClean(self._cellMemberMerge(cellObject[valueList[0]])["text"])) <= self.countUnitMaximum:
+            return False
+
+        for a in range(1, len(valueList)):
+            if len(self._textClean(self._cellMemberMerge(cellObject[valueList[a]])["text"])) > self.countUnitMaximum:
+                return False
+
+        return True
+
+    def _enclosedPairBuild(self, restList, height, verticalList, lineObject, pairList):
+        usedList = []
+
+        for a in range(len(restList)):
+            text = self._textClean(restList[a]["text"])
+
+            if len(text) < 2 or unicodedata.category(text[0]) != "Ps" or unicodedata.category(text[-1]) != "Pe":
+                continue
+
+            index = 1
+
+            while index < len(text) - 1 and unicodedata.category(text[index])[0] == "L":
+                index += 1
+
+            if index == 1 or index == len(text) - 1 or unicodedata.category(text[index]) != "Nd":
+                continue
+
+            keyObject = dict(restList[a])
+            keyObject["text"] = text[1:index]
+
+            valueObject = dict(restList[a])
+            valueObject["text"] = text[index:len(text) - 1]
+
+            self._cellPairAppend([keyObject], [valueObject], height, verticalList, lineObject, pairList)
+
+            usedList.append(restList[a])
+
+        return usedList
+
+    def _segmentLabelPairCheck(self, segment, lineList, height, itemList):
+        if len(segment) != 2 or len(lineList) == 0:
+            return False
+
+        valueList = segment[1]["itemList"]
+
+        text = ""
+
+        left = valueList[0]["bbox"][0]
+        right = valueList[0]["bbox"][2]
+
+        for a in range(len(valueList)):
+            text += self._textClean(valueList[a]["text"])
+
+            left = min(left, valueList[a]["bbox"][0])
+            right = max(right, valueList[a]["bbox"][2])
+
+        if len(text) < 2 or self._letterOnlyCheck(text) == False or (right - left) / len(text) < height * self.levelLabelPitch:
+            return False
+
+        centerY = (valueList[0]["bbox"][1] + valueList[0]["bbox"][3]) / 2
+
+        positionList = []
+
+        for a in range(len(lineList)):
+            center = (lineList[a][0] + lineList[a][2]) / 2
+
+            if lineList[a][1] <= centerY and lineList[a][3] >= centerY and center >= right - height * self.levelMargin:
+                positionList.append(center)
+
+        positionList.sort()
+
+        if len(positionList) == 0:
+            return False
+
+        wallAfter = None
+
+        for a in range(1, len(positionList)):
+            if positionList[a] - positionList[0] > height:
+                wallAfter = positionList[a]
+
+                break
+
+        if wallAfter == None or wallAfter - positionList[0] < height * self.levelLabelEmpty:
+            return False
+
+        for a in range(len(itemList)):
+            bboxList = itemList[a]["bbox"]
+
+            centerX = (bboxList[0] + bboxList[2]) / 2
+
+            if centerX > positionList[0] and centerX < wallAfter and abs((bboxList[1] + bboxList[3]) / 2 - centerY) <= height:
+                return False
+
+        return True
+
+    def _cellFilledCheck(self, itemList, cell):
+        for a in range(len(itemList)):
+            bboxList = itemList[a]["bbox"]
+
+            centerX = (bboxList[0] + bboxList[2]) / 2
+            centerY = (bboxList[1] + bboxList[3]) / 2
+
+            if centerX > cell[0] and centerX < cell[1] and centerY > cell[2] and centerY < cell[3]:
+                return True
+
+        return False
+
+    def _cellLeftFilledCheck(self, cell, height, lineObject, itemList):
+        centerY = (cell[2] + cell[3]) / 2
+
+        probeX = cell[0] - height * self.levelCellLeftProbe - height / 2
+
+        cellLeft = self._cellProbe([probeX, centerY - height / 2, probeX, centerY + height / 2], height, lineObject)
+
+        if cellLeft == None or abs(cellLeft[2] - cell[2]) > height * self.levelBandSame or abs(cellLeft[3] - cell[3]) > height * self.levelBandSame:
+            return False
+
+        return self._cellFilledCheck(itemList, cellLeft)
+
+    def _cellAdjacentBuild(self, restList, height, lineObject, itemList, verticalList, pairList):
+        cellObject = {}
+
+        for a in range(len(restList)):
+            cell = self._cellProbe(restList[a]["bbox"], height, lineObject)
+
+            if cell != None:
+                if cell not in cellObject:
+                    cellObject[cell] = []
+
+                cellObject[cell].append(restList[a])
+
+        margin = height * self.levelCellInside
+
+        usedList = []
+
+        for cell in sorted(cellObject, key=lambda cellSort: cellSort[0]):
+            memberList = cellObject[cell]
+
+            if memberList[0] in usedList or self._cellPlainCheck(memberList) == False:
+                continue
+
+            keyObject = self._cellMemberMerge(memberList)
+
+            if len(self._textClean(keyObject["text"])) <= self.countUnitMaximum or self._letterContain(keyObject["text"]) == False or len(self._cellLineGroup(sorted(memberList, key=lambda itemObject: itemObject["bbox"][1]))) > self.countCellRow or self._cellBelowFreeCheck([cell], cellObject, itemList, cell) == False or self._cellLeftFilledCheck(cell, height, lineObject, restList):
+                continue
+
+            centerY = (cell[2] + cell[3]) / 2
+
+            valueList = []
+
+            right = cell[1]
+
+            isFound = True
+
+            while isFound:
+                isFound = False
+
+                for cellOther in cellObject:
+                    if abs(cellOther[0] - right) <= margin and cellOther[2] <= centerY and cellOther[3] >= centerY and cellOther[1] > cellOther[0] and cellObject[cellOther][0] not in usedList and self._cellBelowFreeCheck([cellOther], cellObject, itemList, cellOther) and self._cellVerticalCheck(cellObject[cellOther]) == False and (len(valueList) == 0 or self._wallThroughCheck(height, lineObject["verticalList"], right, cell) == False):
+                        valueList.append(cellOther)
+
+                        right = cellOther[1]
+
+                        isFound = True
+
+                        break
+
+            if len(valueList) == 0 or self._valueKeyFirstCheck(valueList, cellObject):
+                continue
+
+            segment = [{"itemList": memberList}]
+
+            for a in range(len(valueList)):
+                segment.append({"itemList": cellObject[valueList[a]]})
+
+            if self._segmentLabelRowCheck(segment, height, lineObject["horizontalList"], lineObject["verticalList"]) or self._segmentLabelPairCheck(segment, lineObject["verticalList"], height, itemList):
+                continue
+
+            textList = []
+
+            for a in range(len(valueList)):
+                textList.append(self._cellMemberMerge(cellObject[valueList[a]])["text"])
+
+            valueObject = self._cellMemberMerge(cellObject[valueList[0]])
+
+            valueObject["text"] = " / ".join(textList)
+
+            self._cellPairAppend([keyObject], [valueObject], height, verticalList, lineObject, pairList)
+
+            usedList = usedList + memberList
+
+            for a in range(len(valueList)):
+                usedList = usedList + cellObject[valueList[a]]
+
+        return usedList
+
     def _cellTitleCheck(self, memberList):
         for a in range(len(memberList)):
             if memberList[a].get("isTitle"):
@@ -4115,38 +4641,7 @@ class Form:
 
         return len(set(indexList)) == 1
 
-    def _keyWallCrossCheck(self, keyList, lineList, height):
-        for a in range(len(keyList)):
-            bboxList = keyList[a]["bbox"]
-
-            centerY = (bboxList[1] + bboxList[3]) / 2
-
-            if self._wallCheck(lineList, bboxList[0] + height * self.levelMargin, bboxList[2] - height * self.levelMargin, [bboxList[0], centerY - height / 2, bboxList[2], centerY + height / 2]):
-                return True
-
-        return False
-
-    def _cellFilledCount(self, wallList, itemList, bandList):
-        count = 0
-
-        for a in range(len(wallList)):
-            for b in range(len(itemList)):
-                bboxList = itemList[b]["bbox"]
-
-                centerX = (bboxList[0] + bboxList[2]) / 2
-                centerY = (bboxList[1] + bboxList[3]) / 2
-
-                if centerX > wallList[a] and (a == len(wallList) - 1 or centerX < wallList[a + 1]) and centerY > bandList[0] and centerY < bandList[1]:
-                    count += 1
-
-                    break
-
-        return count
-
-    def _segmentLabelRowCheck(self, segment, lineList, height, horizontalList, itemList):
-        if self._keyWallCrossCheck(segment[0]["itemList"], lineList, height) == False:
-            return False
-
+    def _segmentLabelRowCheck(self, segment, height, horizontalList, lineList):
         bboxKeyList = segment[0]["itemList"][0]["bbox"]
 
         centerY = (bboxKeyList[1] + bboxKeyList[3]) / 2
@@ -4156,15 +4651,35 @@ class Form:
         if bandList == None:
             return False
 
-        wallList = []
+        right = 0
+
+        for a in range(1, len(segment)):
+            for b in range(len(segment[a]["itemList"])):
+                right = max(right, segment[a]["itemList"][b]["bbox"][2])
+
+        margin = height * self.levelMargin
+
+        positionList = []
 
         for a in range(len(lineList)):
-            if lineList[a][1] <= bandList[0] + height * self.levelMargin and lineList[a][3] >= bandList[1] + height and lineList[a][0] >= bboxKeyList[0]:
-                wallList.append((lineList[a][0] + lineList[a][2]) / 2)
+            center = (lineList[a][0] + lineList[a][2]) / 2
 
-        wallList.sort()
+            if center <= bboxKeyList[0] or center >= right or lineList[a][1] > bandList[0] + margin or lineList[a][3] < bandList[1] - margin:
+                continue
 
-        return self._cellFilledCount(wallList, itemList, bandList) >= self.countLabelRowCell
+            if lineList[a][3] < bandList[1] + height:
+                return False
+
+            isNear = False
+
+            for b in range(len(positionList)):
+                if abs(positionList[b] - center) <= margin:
+                    isNear = True
+
+            if isNear == False:
+                positionList.append(center)
+
+        return len(positionList) >= self.countLabelRowCell
 
     def _segmentWallCheck(self, segment, lineList, height):
         if len(lineList) == 0:
@@ -4278,7 +4793,7 @@ class Form:
                     if self._symbolCheck(self._textClean("".join(self._columnText(segment[c])))):
                         isSymbol = True
 
-                if len(segment) < 2 or isShort or isSymbol or self._segmentFreeCheck(segment) or self._segmentCaptionCheck(segment, itemList, height, horizontalList) or len(keyText) <= self.countUnitMaximum or self._segmentLabelRowCheck(segment, lineList, height, horizontalList, itemList) or self._segmentWallCheck(segment, lineList, height) == False:
+                if len(segment) < 2 or isShort or isSymbol or self._segmentFreeCheck(segment) or self._segmentCaptionCheck(segment, itemList, height, horizontalList) or len(keyText) <= self.countUnitMaximum or self._segmentLabelRowCheck(segment, height, horizontalList, lineList) or self._segmentLabelPairCheck(segment, lineList, height, itemList) or self._segmentWallCheck(segment, lineList, height) == False:
                     lineTextList = []
 
                     bboxLineList = None
@@ -4331,6 +4846,7 @@ class Form:
 
                 pairList.append({
                     "y": bboxSegmentList[1],
+                    "bbox": bboxSegmentList,
                     "section": sectionList[0]["text"] if len(sectionList) > 0 else "",
                     "group": " / ".join(groupList),
                     "sectionList": sectionList,
@@ -5245,6 +5761,8 @@ class Form:
 
         itemPageList = self._stackTitleCollect(itemPageList, lineObject, verticalBoxList)
 
+        itemPageList = self._stackSparseCollect(itemPageList, lineObject, verticalBoxList)
+
         itemPageList = self._verticalBoxCollect(itemPageList, verticalBoxList)
 
         mergeObject = self._verticalMerge(itemPageList, lineObject["horizontalList"])
@@ -5364,7 +5882,13 @@ class Form:
 
         headerPairList = []
 
-        restHeaderList = self._cellHeaderBuild(self._lineFreeList(restList, textPairObject["lineItemList"]), mergeObject["verticalList"], sectionUsedList, height, lineObject, True, itemList, headerPairList)
+        restFreeList = self._lineFreeList(restList, textPairObject["lineItemList"])
+
+        restHeaderList = self._cellHeaderBuild(restFreeList, mergeObject["verticalList"], sectionUsedList, height, lineObject, True, itemList, headerPairList)
+
+        restHeaderList = restHeaderList + self._enclosedPairBuild(self._restRemove(restFreeList, restHeaderList), height, mergeObject["verticalList"], lineObject, headerPairList)
+
+        restHeaderList = restHeaderList + self._cellAdjacentBuild(self._restRemove(restFreeList, restHeaderList), height, lineObject, itemList, mergeObject["verticalList"], headerPairList)
 
         if len(headerPairList) > 0:
             textPairObject = self._textPairBuild(self._restRemove(restList, restHeaderList), mergeObject["verticalList"], height, lineObject["verticalList"], lineObject["horizontalList"], itemList)
@@ -5373,7 +5897,9 @@ class Form:
 
         self._sectionUsedAppend(textPairObject["pairList"], sectionUsedList)
 
-        pairList = self._pairOrder(pairList + textPairObject["pairList"])
+        pairList = self._pairRowAttach(pairList + textPairObject["pairList"], lineObject["horizontalList"], outsideLineList, numberPage, height, lineObject["verticalList"])
+
+        pairList = self._pairOrder(pairList)
 
         restList = list(outsideLineList)
 
@@ -5691,7 +6217,22 @@ class Form:
         for a in range(len(boxList)):
             boxList[a]["text"] = recognitionList[a]["text"]
 
+            boxList[a]["charPositionList"] = self._charPositionBuild(boxList[a]["isVertical"], boxList[a]["bboxRecognize"], recognitionList[a]["positionList"])
+
         return boxList
+
+    def _charPositionBuild(self, isVertical, bboxList, positionList):
+        resultList = []
+
+        if isVertical:
+            return resultList
+
+        width = bboxList[2] - bboxList[0]
+
+        for a in range(len(positionList)):
+            resultList.append({"text": positionList[a]["text"], "start": bboxList[0] + positionList[a]["start"] * width, "end": bboxList[0] + positionList[a]["end"] * width})
+
+        return resultList
 
     def _speckRemove(self, itemList, height):
         resultList = []
@@ -5755,7 +6296,7 @@ class Form:
             if len(text.strip()) == 0:
                 continue
 
-            itemList.append({"text": text, "bbox": boxList[a]["bbox"], "isVertical": boxList[a]["isVertical"], "charList": [], "page": numberPage, "detectionIndex": boxList[a]["index"]})
+            itemList.append({"text": text, "bbox": boxList[a]["bbox"], "isVertical": boxList[a]["isVertical"], "charList": [], "charPositionList": boxList[a]["charPositionList"], "page": numberPage, "detectionIndex": boxList[a]["index"]})
 
         itemList = self._speckRemove(itemList, height)
 
@@ -5768,7 +6309,7 @@ class Form:
     def __init__(self):
         self.levelFormArea = 0.6
         self.levelFormText = 0.9
-        self.levelFormOverlap = 0.3
+        self.levelFormOverlap = 0.2
         self.levelLineExtend = 0.5
         self.levelLineDouble = 1.7
         self.levelLineMiddle = 0.3
@@ -5874,6 +6415,19 @@ class Form:
         self.countCellRow = 2
         self.countCellHeaderRow = 3
         self.countLabelRowCell = 3
+        self.levelBandSame = 0.5
+        self.levelLabelPitch = 1.1
+        self.levelLabelEmpty = 3.0
+        self.countRowColumn = 3
+        self.countAttachKey = 3
+        self.levelCellLeftProbe = 0.3
+        self.levelSeparatorGap = 2.0
+        self.levelSparseGap = 3.0
+        self.countSparseMinimum = 2
+        self.levelTableDouble = 1.5
+        self.levelWallCutLength = 3.0
+        self.levelWallCutHeight = 0.6
+        self.countPartIndex = 100000
         self.levelCellHeaderBand = 1.5
         self.levelSpeckWidth = 0.1
         self.levelSpeckSide = 0.3

@@ -66,23 +66,28 @@ class Recognition:
 
         return resultList
 
-    def _textDecode(self, probability):
+    def _textDecode(self, probability, widthColumn):
         indexList = probability.argmax(axis=-1)
         valueList = probability.max(axis=-1)
 
         text = ""
         scoreList = []
+        positionList = []
 
         for a in range(len(indexList)):
             if indexList[a] == 0:
                 continue
 
             if a > 0 and indexList[a] == indexList[a - 1]:
+                positionList[len(positionList) - 1]["end"] = (a + 1) * widthColumn
+
                 continue
 
             text += self.characterList[indexList[a]]
 
             scoreList.append(float(valueList[a]))
+
+            positionList.append({"text": self.characterList[indexList[a]], "start": a * widthColumn, "end": (a + 1) * widthColumn})
 
         score = 0.0
 
@@ -91,7 +96,8 @@ class Recognition:
 
         return {
             "text": text,
-            "score": score
+            "score": score,
+            "positionList": positionList
         }
 
     def execute(self, coordinateItemList, image):
@@ -105,7 +111,7 @@ class Recognition:
         resultList = []
 
         for a in range(len(imageCropList)):
-            resultList.append({"text": "", "score": 0.0})
+            resultList.append({"text": "", "score": 0.0, "positionList": []})
 
             if imageCropList[a] is not None:
                 indexList.append(a)
@@ -120,6 +126,7 @@ class Recognition:
             widthMax = self.imageWidthModel
 
             imageResizedList = []
+            widthResizedList = []
 
             for b in range(len(groupList)):
                 imageCrop = imageCropList[groupList[b]]
@@ -127,6 +134,8 @@ class Recognition:
                 widthResized = min(int(math.ceil(self.imageHeightModel * imageCrop.shape[1] / float(imageCrop.shape[0]))), self.imageWidthMax)
 
                 widthMax = max(widthMax, widthResized)
+
+                widthResizedList.append(widthResized)
 
                 imageResizedList.append(cv2.resize(imageCrop, (widthResized, self.imageHeightModel)))
 
@@ -141,7 +150,7 @@ class Recognition:
             tensorOutputList = self.onnxSession.run(None, {"x": tensorBatch})
 
             for b in range(len(groupList)):
-                resultList[groupList[b]] = self._textDecode(tensorOutputList[0][b])
+                resultList[groupList[b]] = self._textDecode(tensorOutputList[0][b], widthMax / float(tensorOutputList[0][b].shape[0]) / widthResizedList[b])
 
         return resultList
 
