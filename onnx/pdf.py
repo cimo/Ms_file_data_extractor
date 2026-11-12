@@ -1307,6 +1307,7 @@ class Pdf:
     def _pathReset(self):
         self.isPathEmpty = True
         self.isPathRectangle = False
+        self.isPathCurve = False
 
     def _pageContent(self, entryObject):
         result = ""
@@ -1770,6 +1771,9 @@ class Pdf:
             self.strokeColor = self._colorRgb((1 - number(4)) * (1 - number(1)), (1 - number(3)) * (1 - number(1)), (1 - number(2)) * (1 - number(1)))
         elif operator == "m" or operator == "l" or operator == "c" or operator == "v" or operator == "y":
             self._pathAddPoint(number(2), number(1))
+
+            if operator == "c" or operator == "v" or operator == "y":
+                self.isPathCurve = True
         elif operator == "re":
             x = number(4)
             y = number(3)
@@ -1992,7 +1996,8 @@ class Pdf:
                 "y1": self.pageHeight - self.pathMinY,
                 "color": self.fillColor if isFill else self.strokeColor,
                 "isFill": isFill,
-                "isStroke": isStroke
+                "isStroke": isStroke,
+                "isCurve": self.isPathCurve
             })
 
         self._pathReset()

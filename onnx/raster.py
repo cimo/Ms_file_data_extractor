@@ -65,7 +65,7 @@ class Raster:
         if self.isDebug:
             boxDebugWrite(image, bboxDebugList, f"{pathOutput}debug/ocr/{numberPage}.jpg")
 
-        return {"itemList": itemList, "text": self.form.execute(resultObject["itemList"], resultObject["ringList"], resultObject["lineObject"], numberPage)}
+        return {"itemList": itemList, "text": self.form.execute(resultObject["itemList"], resultObject["ringList"], resultObject["lineObject"], [], numberPage)}
 
     def watermarkApply(self, pageObject, pathOutput):
         detectionList = self.ocr.boxDetect(pageObject["image"])
@@ -232,7 +232,9 @@ class Raster:
 
             lineObject = self.raster.form.lineBuild(pageObject["image"], detectionList)
 
-            return self.raster.form.execute(itemFormList, ringList, lineObject, numberPage)
+            circleList = self.raster.form.circleBuild(detectionList, pageCharObject["elementList"], scale)
+
+            return self.raster.form.execute(itemFormList, ringList, lineObject, circleList, numberPage)
 
         def _pageCharCollect(self, password, pathInput):
             pageList = self.raster.form.pdfParse(pathInput, password)["pageList"]
