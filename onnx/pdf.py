@@ -1,4 +1,5 @@
 import sys
+import icu
 import fontTools.agl
 import math
 import zlib
@@ -11,7 +12,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 sys.dont_write_bytecode = True
 
 # Source
-from helper import spacelessCheck, whitespaceCheck, boxFromPointList
+from helper import spacelessCheck, whitespaceCheck, boxFromPointList, characterNormalize, ideographPageResolve
 
 def mergeText(elementList):
     resultList = []
@@ -44,7 +45,10 @@ def mergeText(elementList):
 
             isSameLine = isSameLine and current["isVertical"] == element["isVertical"]
             isCompatibleSize = elementSize >= size * 0.45 and elementSize <= size * 1.4
-            isClose = gap >= -size * 0.3 and gap <= size * 1.0
+            isClose = gap >= -size * 0.3 and gap <= size * 0.6
+
+            if isClose and gap >= size * 0.4 and gapOccupiedCheck(current, elementList, element, size):
+                isClose = False
 
             if isSameLine and isCompatibleSize and isClose:
                 previousText = current["text"] if current.get("text") is not None else ""
@@ -52,7 +56,7 @@ def mergeText(elementList):
                 isSpace = gap > size * 0.15 and whitespaceCheck(previousText[-1:]) == False and whitespaceCheck(elementText[0:1]) == False
 
                 if spacelessCheck(previousText[-1:]) and spacelessCheck(elementText[0:1]):
-                    isSpace = False
+                    isSpace = gap >= size * 0.25 and icu.Char.isalpha(previousText[-1:]) and icu.Char.isalpha(elementText[0:1])
 
                 current["text"] = f"{previousText} {elementText}" if isSpace else f"{previousText}{elementText}"
 
@@ -80,6 +84,26 @@ def mergeText(elementList):
         resultList.append(pendingList[a])
 
     return resultList
+
+def gapOccupiedCheck(current, elementList, element, size):
+    nameFlow = "y" if current["isVertical"] else "x"
+    nameCross = "x" if current["isVertical"] else "y"
+
+    for a in range(len(elementList)):
+        other = elementList[a]
+
+        if other["type"] != "text" or other is element or other["isVertical"] != current["isVertical"]:
+            continue
+
+        if abs(other[f"{nameCross}0"] - element[f"{nameCross}0"]) > size * 0.6:
+            continue
+
+        center = (other[f"{nameFlow}0"] + other[f"{nameFlow}1"]) / 2
+
+        if center > current[f"{nameFlow}1"] and center < element[f"{nameFlow}0"]:
+            return True
+
+    return False
 
 class Pdf:
     def _byteText(self, byteList):
@@ -742,12 +766,10 @@ class Pdf:
         return result
 
     def _ascii85Decode(self, byteList):
-        result = bytes(byteList)
+        result = bytes(byteList).strip()
 
-        indexStart = result.find(b"<~")
-
-        if indexStart >= 0:
-            result = result[indexStart + 2:]
+        if result.startswith(b"<~"):
+            result = result[2:]
 
         indexEnd = result.find(b"~>")
 
@@ -1802,6 +1824,7 @@ class Pdf:
 
     def _showText(self, partList, font):
         text = ""
+        advanceStart = 0
         advance = 0
 
         for a in range(len(partList)):
@@ -1829,24 +1852,39 @@ class Pdf:
 
                     advance += glyph * self.horizontalScale
             elif part["kind"] == "number":
-                advance -= part["value"] / 1000 * self.fontSize * (1 if font["isVertical"] else self.horizontalScale)
+                scale = self.fontSize * (1 if font["isVertical"] else self.horizontalScale)
 
+                shift = -part["value"] / 1000 * scale
+
+                if shift >= scale * self.levelTextShift:
+                    self._textElementAppend(font, advanceStart, advance, text)
+
+                    text = ""
+                    advanceStart = advance + shift
+
+                advance += shift
+
+        self._textElementAppend(font, advanceStart, advance, text)
+
+        self.textMatrixList = self._matrixMultiply(self.textMatrixList, [1, 0, 0, 1, 0, -advance] if font["isVertical"] else [1, 0, 0, 1, advance, 0])
+
+    def _textElementAppend(self, font, advanceStart, advance, text):
         renderMatrixList = self._matrixMultiply(self.ctmList, self.textMatrixList)
         deviceFontSize = self.fontSize * math.hypot(renderMatrixList[2], renderMatrixList[3])
 
         if font["isVertical"]:
             cornerList = [
-                self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise),
-                self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise),
+                self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise - advanceStart),
+                self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise - advanceStart),
                 self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise - advance),
                 self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise - advance)
             ]
         else:
             cornerList = [
-                self._transformPoint(renderMatrixList, 0, self.textRise - self.fontSize * 0.2),
+                self._transformPoint(renderMatrixList, advanceStart, self.textRise - self.fontSize * 0.2),
                 self._transformPoint(renderMatrixList, advance, self.textRise - self.fontSize * 0.2),
                 self._transformPoint(renderMatrixList, advance, self.textRise + self.fontSize * 0.8),
-                self._transformPoint(renderMatrixList, 0, self.textRise + self.fontSize * 0.8)
+                self._transformPoint(renderMatrixList, advanceStart, self.textRise + self.fontSize * 0.8)
             ]
 
         bboxList = boxFromPointList(cornerList)
@@ -1865,8 +1903,6 @@ class Pdf:
                 "isWidthEstimated": font["isWidthEstimated"],
                 "color": self.fillColor
             })
-
-        self.textMatrixList = self._matrixMultiply(self.textMatrixList, [1, 0, 0, 1, 0, -advance] if font["isVertical"] else [1, 0, 0, 1, advance, 0])
 
     def _fontDecode(self, raw, font):
         charList = []
@@ -1903,6 +1939,8 @@ class Pdf:
 
             if character is None:
                 character = chr(code) if font["byteLength"] == 1 or font["isUnicodeCode"] else ""
+
+            character = characterNormalize(character)
 
             widthFraction = font["defaultWidthFraction"]
 
@@ -1978,7 +2016,11 @@ class Pdf:
         for a in range(len(indirectList)):
             self.indirectObject[indirectList[a]["number"]] = indirectList[a]
 
-        return {"message": "", "pageList": self._buildPage()}
+        pageList = self._buildPage()
+
+        ideographPageResolve(pageList)
+
+        return {"message": "", "pageList": pageList}
 
     def __init__(self):
         self.delimiterSet = set(ord(value) for value in "()<>[]{}/%")
@@ -1989,6 +2031,8 @@ class Pdf:
         self.paddingByteList = bytes([0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08, 0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c, 0xa9, 0xfe, 0x64, 0x53, 0x69, 0x7a])
 
         self.versionEncryptList = [1, 2, 4, 5]
+
+        self.levelTextShift = 0.4
 
         self.messageEncryption = "Encryption not supported."
         self.messagePasswordRequired = "Password required."

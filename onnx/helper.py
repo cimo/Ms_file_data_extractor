@@ -1,4 +1,5 @@
 import os
+import re
 import cv2
 import icu
 import json
@@ -109,6 +110,148 @@ def whitespaceCheck(character):
         return False
 
     return icu.Char.isUWhiteSpace(character)
+
+def privateUseCheck(character):
+    if character == "":
+        return False
+
+    return icu.Char.charType(character) == icu.UCharCategory.PRIVATE_USE_CHAR
+
+def characterNormalize(text):
+    result = ""
+
+    for a in range(len(text)):
+        if icu.Char.getIntPropertyValue(text[a], icu.UProperty.BLOCK) == icu.UBlockCode.ALPHABETIC_PRESENTATION_FORMS:
+            result += icu.Normalizer2.getNFKCInstance().normalize(text[a])
+        else:
+            result += text[a]
+
+    return result
+
+def ideographPageResolve(pageList):
+    textList = []
+
+    for a in range(len(pageList)):
+        elementList = pageList[a]["elementList"]
+
+        for b in range(len(elementList)):
+            if elementList[b]["type"] == "text":
+                textList.append(elementList[b]["text"])
+
+    resolveObject = ideographResolveBuild(ideographLocaleDetect("".join(textList)))
+
+    for a in range(len(pageList)):
+        elementList = pageList[a]["elementList"]
+
+        for b in range(len(elementList)):
+            if elementList[b]["type"] == "text":
+                elementList[b]["text"] = ideographTextResolve(elementList[b]["text"], resolveObject)
+
+def ideographLocaleDetect(text):
+    result = ""
+
+    countBest = 0
+
+    for locale in ideographExemplarObject:
+        count = 0
+
+        for a in range(len(text)):
+            if text[a] in ideographExemplarObject[locale]:
+                count += 1
+
+        if count > countBest:
+            result = locale
+            countBest = count
+
+    return result
+
+def ideographResolveBuild(locale):
+    resultObject = {}
+
+    for character in ideographEquivalentObject:
+        resultObject[character] = ideographEquivalentObject[character]
+
+        if locale == "" or resultObject[character] in ideographExemplarObject[locale] or resultObject[character] not in ideographVariantObject:
+            continue
+
+        variantList = ideographVariantObject[resultObject[character]]
+
+        for a in range(len(variantList)):
+            if variantList[a] in ideographExemplarObject[locale]:
+                resultObject[character] = variantList[a]
+
+                break
+
+    return resultObject
+
+def ideographTextResolve(text, resolveObject):
+    result = ""
+
+    for a in range(len(text)):
+        result += resolveObject[text[a]] if text[a] in resolveObject else text[a]
+
+    return result
+
+def ideographEquivalentBuild():
+    resultObject = {}
+
+    with open(f"{os.path.dirname(__file__)}/language/equivalent.txt", encoding="utf-8") as file:
+        lineList = file.read().split("\n")
+
+    for a in range(len(lineList)):
+        match = re.match(r"^([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s*;\s*([0-9A-F]+)", lineList[a])
+
+        if match is None:
+            continue
+
+        last = match.group(2) if match.group(2) is not None else match.group(1)
+
+        for code in range(int(match.group(1), 16), int(last, 16) + 1):
+            resultObject[chr(code)] = chr(int(match.group(3), 16))
+
+    return resultObject
+
+def ideographVariantBuild():
+    resultObject = {}
+
+    with open(f"{os.path.dirname(__file__)}/language/variant.txt", encoding="utf-8") as file:
+        lineList = file.read().split("\n")
+
+    for a in range(len(lineList)):
+        match = re.match(r"^U\+([0-9A-F]+)\s+kZVariant\s+(.+)$", lineList[a])
+
+        if match is None:
+            continue
+
+        codeList = re.findall(r"U\+([0-9A-F]+)", match.group(2))
+
+        variantList = []
+
+        for b in range(len(codeList)):
+            variantList.append(chr(int(codeList[b], 16)))
+
+        resultObject[chr(int(match.group(1), 16))] = variantList
+
+    return resultObject
+
+def ideographExemplarBuild():
+    resultObject = {}
+
+    localeList = ["ja", "zh", "zh_Hant"]
+
+    for a in range(len(localeList)):
+        localeData = icu.LocaleData(localeList[a])
+
+        resultObject[localeList[a]] = set(localeData.getExemplarSet(0, icu.ULocaleDataExemplarSetType.ES_STANDARD)) | set(localeData.getExemplarSet(0, icu.ULocaleDataExemplarSetType.ES_AUXILIARY))
+
+    return resultObject
+
+def tokenFirstLength(text):
+    breakIterator = icu.BreakIterator.createLineInstance(icu.Locale.getRoot())
+
+    breakIterator.setText(text)
+
+    return breakIterator.following(0)
 
 def textNormalize(text):
     result = ""
@@ -310,4 +453,7 @@ mediaQuality = 80
 
 widthWideList = [icu.Char.getPropertyValueEnum(icu.UProperty.EAST_ASIAN_WIDTH, "W"), icu.Char.getPropertyValueEnum(icu.UProperty.EAST_ASIAN_WIDTH, "F")]
 lineBreakComplex = icu.Char.getPropertyValueEnum(icu.UProperty.LINE_BREAK, "SA")
+ideographEquivalentObject = ideographEquivalentBuild()
+ideographVariantObject = ideographVariantBuild()
+ideographExemplarObject = ideographExemplarBuild()
 # Custom

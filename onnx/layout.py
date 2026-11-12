@@ -169,13 +169,57 @@ class Layout:
         for a in range(len(columnList)):
             isAside = isBandTall and countFlowMain > 0 and countFlowList[a] / float(countFlowMain) < self.levelColumnFlow
 
-            itemColumnList = sorted(columnList[a]["itemList"], key=lambda itemObject: itemObject["bboxOrder"][1])
+            itemColumnList = self._columnLocalOrder(columnList[a]["itemList"])
 
             for b in range(len(itemColumnList)):
                 itemColumnList[b]["isAside"] = isAside
                 itemColumnList[b]["columnX1"] = columnList[a]["x1"]
 
                 resultList.append(itemColumnList[b])
+
+        return resultList
+
+    def _columnLocalOrder(self, itemList):
+        itemSortedList = sorted(itemList, key=lambda itemObject: itemObject["bboxOrder"][1])
+
+        clusterList = []
+
+        y2Cluster = 0
+
+        for a in range(len(itemSortedList)):
+            bboxList = itemSortedList[a]["bboxOrder"]
+
+            if len(clusterList) > 0 and bboxList[1] < y2Cluster:
+                clusterList[len(clusterList) - 1].append(itemSortedList[a])
+
+                y2Cluster = max(y2Cluster, bboxList[3])
+
+                continue
+
+            clusterList.append([itemSortedList[a]])
+
+            y2Cluster = bboxList[3]
+
+        resultList = []
+
+        for a in range(len(clusterList)):
+            subColumnList = []
+
+            itemClusterList = sorted(clusterList[a], key=lambda itemObject: itemObject["bboxOrder"][0])
+
+            for b in range(len(itemClusterList)):
+                bboxList = itemClusterList[b]["bboxOrder"]
+
+                if len(subColumnList) > 0 and bboxList[0] < subColumnList[len(subColumnList) - 1]["x2"]:
+                    subColumnList[len(subColumnList) - 1]["x2"] = max(subColumnList[len(subColumnList) - 1]["x2"], bboxList[2])
+                    subColumnList[len(subColumnList) - 1]["itemList"].append(itemClusterList[b])
+
+                    continue
+
+                subColumnList.append({"x2": bboxList[2], "itemList": [itemClusterList[b]]})
+
+            for b in range(len(subColumnList)):
+                resultList = resultList + sorted(subColumnList[b]["itemList"], key=lambda itemObject: itemObject["bboxOrder"][1])
 
         return resultList
 

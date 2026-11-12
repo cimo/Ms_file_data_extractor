@@ -269,7 +269,7 @@ class Raster:
             scaleX = imageWidth / pageReader["width"]
             scaleY = imageHeight / pageReader["height"]
 
-            elementList = pdf.mergeText(self._widthCorrect(pageReader["elementList"], image, pageReader["rotate"], scaleX, scaleY))
+            elementList = pdf.mergeText(self._bulletMark(self._widthCorrect(pageReader["elementList"], image, pageReader["rotate"], scaleX, scaleY)))
 
             resultList = []
 
@@ -289,10 +289,74 @@ class Raster:
                     "page": numberPage,
                     "bbox": bboxList,
                     "centerPoint": centerPointCalculate(bboxList),
-                    "text": elementList[a]["text"]
+                    "text": elementList[a]["text"],
+                    "fontSize": elementList[a]["fontSize"],
+                    "isBold": self.labelBold in elementList[a]["fontName"].casefold() if elementList[a]["fontName"] != "" else None
                 })
 
             return resultList
+
+        def _bulletMark(self, elementList):
+            textList = []
+            bulletList = []
+
+            for a in range(len(elementList)):
+                if elementList[a]["type"] == "text":
+                    if elementList[a]["isVertical"] == False:
+                        textList.append(elementList[a])
+
+                    continue
+
+                if elementList[a]["type"] == "path" and elementList[a]["isFill"]:
+                    bulletList.append(elementList[a])
+
+            matchList = []
+
+            for a in range(len(bulletList)):
+                textObject = self._bulletTextFind(bulletList[a], textList)
+
+                if textObject != None:
+                    matchList.append({"bullet": bulletList[a], "text": textObject})
+
+            for a in range(len(matchList)):
+                count = 0
+
+                for b in range(len(matchList)):
+                    if abs(matchList[a]["bullet"]["x0"] - matchList[b]["bullet"]["x0"]) <= matchList[a]["text"]["fontSize"] * self.levelBulletSize:
+                        count += 1
+
+                if count >= self.countBullet:
+                    matchList[a]["text"]["text"] = f"- {matchList[a]['text']['text']}"
+
+            return elementList
+
+        def _bulletTextFind(self, bulletObject, textList):
+            centerY = (bulletObject["y0"] + bulletObject["y1"]) / 2
+
+            width = bulletObject["x1"] - bulletObject["x0"]
+            height = bulletObject["y1"] - bulletObject["y0"]
+
+            result = None
+
+            for a in range(len(textList)):
+                if centerY < textList[a]["y0"] or centerY > textList[a]["y1"]:
+                    continue
+
+                size = textList[a]["fontSize"]
+
+                if width > size * self.levelBulletSize or height > size * self.levelBulletSize:
+                    continue
+
+                if textList[a]["x0"] < bulletObject["x1"]:
+                    return None
+
+                if textList[a]["x0"] - bulletObject["x1"] > size * self.levelBulletGap:
+                    continue
+
+                if result == None or textList[a]["x0"] < result["x0"]:
+                    result = textList[a]
+
+            return result
 
         def _widthCorrect(self, elementList, image, rotate, scaleX, scaleY):
             isRotate = rotate == 90 or rotate == 270
@@ -488,6 +552,12 @@ class Raster:
             self.resolution = "300"
 
             self.levelBoxOverlap = 0.5
+            self.levelBulletSize = 0.6
+            self.levelBulletGap = 3.0
+
+            self.countBullet = 2
+
+            self.labelBold = "bold"
 
             self.axisList = [False, True]
 
