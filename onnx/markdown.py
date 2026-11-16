@@ -410,6 +410,111 @@ class Markdown:
 
             return text
 
+        def _layoutSiblingFind(self, layoutObject, directionObject, lineObject, layoutList, itemList):
+            directionPageObject = directionObject[layoutObject["page"]]
+
+            columnList = self._columnRange(layoutObject["bbox"], directionPageObject)
+            crossList = self._crossRange(lineObject["bbox"], directionPageObject)
+
+            for a in range(len(layoutList)):
+                if layoutList[a] is layoutObject or layoutList[a]["page"] != layoutObject["page"] or self._pairCandidateCheck(directionObject, layoutList[a]) == False:
+                    continue
+
+                columnOtherList = self._columnRange(layoutList[a]["bbox"], directionPageObject)
+
+                if min(columnList[1], columnOtherList[1]) > max(columnList[0], columnOtherList[0]):
+                    continue
+
+                lineOtherList = self._lineGroup(self._itemInsideCollect(itemList, layoutList[a]["page"], layoutList[a]["bbox"]), directionObject)
+
+                if len(lineOtherList) == 0:
+                    continue
+
+                crossOtherList = self._crossRange(lineOtherList[0]["bbox"], directionPageObject)
+
+                if rangeOverlapRatio(crossList[0], crossList[1], crossOtherList[0], crossOtherList[1]) >= self.levelLineOverlap:
+                    return lineOtherList[0]
+
+            return None
+
+        def _layoutLineSplitFind(self, lineList, layoutObject, directionObject, layoutList, itemList):
+            if len(lineList) == 0:
+                return -1
+
+            lineFirstObject = self._layoutSiblingFind(layoutObject, directionObject, lineList[0], layoutList, itemList)
+
+            if lineFirstObject == None:
+                return -1
+
+            directionPageObject = directionObject[layoutObject["page"]]
+
+            columnFirstList = self._columnRange(lineFirstObject["bbox"], directionPageObject)
+
+            for a in range(1, len(lineList)):
+                crossList = self._crossRange(lineList[a]["bbox"], directionPageObject)
+
+                pitch = crossList[0] - self._crossRange(lineList[a - 1]["bbox"], directionPageObject)[0]
+
+                pitchOther = 0
+
+                for b in range(1, len(lineList)):
+                    if b != a:
+                        pitchOther = max(pitchOther, self._crossRange(lineList[b]["bbox"], directionPageObject)[0] - self._crossRange(lineList[b - 1]["bbox"], directionPageObject)[0])
+
+                if pitchOther <= 0 or pitch < pitchOther * self.levelLineSplitPitch:
+                    continue
+
+                lineOtherObject = self._layoutSiblingFind(layoutObject, directionObject, lineList[a], layoutList, itemList)
+
+                if lineOtherObject == None or lineOtherObject is lineFirstObject:
+                    continue
+
+                columnOtherList = self._columnRange(lineOtherObject["bbox"], directionPageObject)
+
+                edgeFirst = columnFirstList[1] if directionPageObject["isRightToLeft"] else columnFirstList[0]
+                edgeOther = columnOtherList[1] if directionPageObject["isRightToLeft"] else columnOtherList[0]
+
+                if abs(edgeOther - edgeFirst) <= (crossList[1] - crossList[0]) * self.levelPairAlign:
+                    return a
+
+            return -1
+
+        def _layoutLineSplit(self, layoutList, directionObject, itemList):
+            resultList = list(layoutList)
+
+            index = 0
+
+            while index < len(resultList):
+                layoutObject = resultList[index]
+
+                index += 1
+
+                if self._pairCandidateCheck(directionObject, layoutObject) == False:
+                    continue
+
+                lineList = self._lineGroup(self._itemInsideCollect(itemList, layoutObject["page"], layoutObject["bbox"]), directionObject)
+
+                indexSplit = self._layoutLineSplitFind(lineList, layoutObject, directionObject, resultList, itemList)
+
+                if indexSplit < 0:
+                    continue
+
+                bboxList = layoutObject["bbox"]
+
+                boundary = int((lineList[indexSplit - 1]["bbox"][3] + lineList[indexSplit]["bbox"][1]) / 2)
+
+                layoutFirstObject = dict(layoutObject)
+                layoutFirstObject["bbox"] = [bboxList[0], bboxList[1], bboxList[2], boundary]
+
+                layoutSecondObject = dict(layoutObject)
+                layoutSecondObject["bbox"] = [bboxList[0], boundary, bboxList[2], bboxList[3]]
+
+                resultList[index - 1] = layoutFirstObject
+
+                resultList.insert(index, layoutSecondObject)
+
+            return resultList
+
         def _itemOrphanCollect(self, itemList, layoutList):
             resultList = []
 
@@ -589,18 +694,18 @@ class Markdown:
 
             return f"{self.labelPrefixObject[label]}{text.replace(self.markdown.separatorLine, self.markdown.separatorText)}"
 
-        def _formWrite(self, layoutObject, formObject, formWrittenList):
+        def _moduleWrite(self, layoutObject, moduleObject, moduleWrittenList):
             label = layoutObject["label"]
 
             if label in self.labelPlaceholderList:
                 return f"![{label}]({layoutObject['path']})"
 
-            if label != "table" or layoutObject["page"] in formWrittenList:
+            if label != "table" or layoutObject["page"] in moduleWrittenList:
                 return ""
 
-            formWrittenList.append(layoutObject["page"])
+            moduleWrittenList.append(layoutObject["page"])
 
-            return formObject[layoutObject["page"]]
+            return moduleObject[layoutObject["page"]]
 
         def _tableFind(self, tableList, layoutObject):
             for a in range(len(tableList)):
@@ -686,15 +791,65 @@ class Markdown:
         def _textBuild(self, itemList, numberPage, bboxList, directionObject):
             return self._lineListWrite(self._lineGroup(self._itemInsideCollect(itemList, numberPage, bboxList), directionObject), directionObject)
 
+        def _lineStart(self, lineObject, directionObject):
+            directionPageObject = directionObject[lineObject["page"]]
+
+            columnList = self._columnRange(lineObject["bbox"], directionPageObject)
+
+            if directionPageObject["isRightToLeft"]:
+                return -columnList[1]
+
+            return columnList[0]
+
+        def _lineSize(self, lineObject, directionObject):
+            crossList = self._crossRange(lineObject["bbox"], directionObject[lineObject["page"]])
+
+            return crossList[1] - crossList[0]
+
+        def _lineStartDominant(self, lineList, directionObject):
+            result = None
+
+            countBest = 1
+
+            for a in range(len(lineList)):
+                start = self._lineStart(lineList[a], directionObject)
+
+                margin = self._lineSize(lineList[a], directionObject) * self.levelLineOutdent
+
+                count = 0
+
+                for b in range(len(lineList)):
+                    if abs(self._lineStart(lineList[b], directionObject) - start) <= margin:
+                        count += 1
+
+                if count > countBest or (count == countBest and result != None and start > result):
+                    result = start
+
+                    countBest = count
+
+            return result
+
+        def _lineOutdentCheck(self, startDominant, lineObject, directionObject):
+            if startDominant == None:
+                return False
+
+            size = self._lineSize(lineObject, directionObject)
+
+            distance = startDominant - self._lineStart(lineObject, directionObject)
+
+            return distance > size * self.levelLineOutdent and distance <= size * self.levelLineOutdentMaximum
+
         def _lineListWrite(self, lineList, directionObject):
             result = ""
 
             isColumnGap = len(lineList) < self.countParagraphLine or self._lineFillCheck(lineList, directionObject) == False
 
+            startDominant = self._lineStartDominant(lineList, directionObject)
+
             for a in range(len(lineList)):
                 text = self._lineText(lineList[a], directionObject, isColumnGap)
 
-                if a > 0 and (self._listMarkCheck(text) or self._lineBreakCheck(directionObject, lineList, a, text)):
+                if a > 0 and (self._listMarkCheck(text) or self._lineBreakCheck(directionObject, lineList, a, text) or self._lineOutdentCheck(startDominant, lineList[a], directionObject)):
                     result += f"{self.markdown.separatorLine}{text}"
                 else:
                     result = self.markdown._textJoin([result, text])
@@ -1305,6 +1460,183 @@ class Markdown:
 
             secondaryList.append(self._lineText(lineObject, directionObject))
 
+        def _tableRowLineList(self, tableObject, rowStart, rowEnd, itemList, directionObject):
+            resultList = []
+
+            cellList = tableObject["cellList"]
+
+            for a in range(len(cellList)):
+                if cellList[a]["rowIndex"] < rowStart or cellList[a]["rowIndex"] >= rowEnd:
+                    continue
+
+                resultList = resultList + self._lineGroup(self._itemInsideCollect(itemList, tableObject["page"], cellList[a]["bbox"]), directionObject)
+
+            return resultList
+
+        def _lineItemList(self, lineList):
+            resultList = []
+
+            for a in range(len(lineList)):
+                resultList = resultList + lineList[a]["itemList"]
+
+            return resultList
+
+        def _tableEdgeMissingCheck(self, lineList, directionPageObject, lineOtherList, margin):
+            for a in range(len(lineList)):
+                columnList = self._columnRange(lineList[a]["bbox"], directionPageObject)
+
+                isFound = False
+
+                for b in range(len(lineOtherList)):
+                    columnOtherList = self._columnRange(lineOtherList[b]["bbox"], directionPageObject)
+
+                    if abs(columnOtherList[0] - columnList[0]) <= margin or abs(columnOtherList[1] - columnList[1]) <= margin or abs(columnOtherList[0] + columnOtherList[1] - columnList[0] - columnList[1]) <= margin * 2:
+                        isFound = True
+
+                        break
+
+                if isFound == False:
+                    return True
+
+            return False
+
+        def _tableTitleFind(self, tableObject, rowIndex, itemList, directionObject, rowStart, countRow):
+            cellList = tableObject["cellList"]
+
+            cellTitle = None
+
+            for a in range(len(cellList)):
+                if cellList[a]["rowIndex"] < rowIndex and cellList[a]["rowIndex"] + cellList[a]["rowSpan"] > rowIndex:
+                    return None
+
+                if cellList[a]["rowIndex"] != rowIndex or len(cellList[a]["text"].strip()) == 0:
+                    continue
+
+                if cellTitle != None:
+                    return None
+
+                cellTitle = cellList[a]
+
+            if cellTitle == None:
+                return None
+
+            itemTitleList = self._itemInsideCollect(itemList, tableObject["page"], cellTitle["bbox"])
+
+            lineTitleList = self._lineGroup(itemTitleList, directionObject)
+
+            lineBeforeList = self._tableRowLineList(tableObject, rowStart, rowIndex, itemList, directionObject)
+            lineAfterList = self._tableRowLineList(tableObject, rowIndex + 1, countRow, itemList, directionObject)
+
+            size = self._sizeDominant(itemTitleList)
+            sizeTable = self._sizeDominant(self._lineItemList(lineBeforeList + lineAfterList))
+
+            if len(lineTitleList) == 0 or size == 0 or sizeTable == 0 or len(lineBeforeList) == 0 or len(lineAfterList) == 0:
+                return None
+
+            text = self._lineText(lineTitleList[0], directionObject)
+
+            if self._listMarkCheck(text) or self._titleCheck(lineTitleList, directionObject, size, sizeTable) == False:
+                return None
+
+            directionPageObject = directionObject[tableObject["page"]]
+
+            crossList = self._crossRange(lineTitleList[0]["bbox"], directionPageObject)
+
+            margin = (crossList[1] - crossList[0]) * self.levelTableTitleAlign
+
+            if self._tableEdgeMissingCheck(lineAfterList, directionPageObject, lineBeforeList, margin) == False and self._tableEdgeMissingCheck(lineBeforeList, directionPageObject, lineAfterList, margin) == False:
+                return None
+
+            return {"text": f"{self.labelPrefixObject['paragraph_title']}{text}", "isJoinable": False, "page": tableObject["page"], "bbox": cellTitle["bbox"], "label": "paragraph_title", "tableObject": None}
+
+        def _tableRowSlice(self, tableObject, rowStart, rowEnd, itemList, directionObject):
+            cellList = []
+
+            bboxList = None
+
+            for a in range(len(tableObject["cellList"])):
+                cellObject = dict(tableObject["cellList"][a])
+
+                if cellObject["rowIndex"] < rowStart or cellObject["rowIndex"] >= rowEnd:
+                    continue
+
+                cellObject["rowIndex"] -= rowStart
+
+                cellList.append(cellObject)
+
+                bboxList = list(cellObject["bbox"]) if bboxList == None else self._bboxExpand(bboxList, cellObject["bbox"])
+
+            sliceObject = dict(tableObject)
+
+            sliceObject["cellList"] = cellList
+            sliceObject["bbox"] = bboxList
+
+            return {"text": self._tableWrite(sliceObject, itemList, directionObject), "isJoinable": False, "page": sliceObject["page"], "bbox": bboxList, "label": "table", "tableObject": sliceObject, "isHeader": self._rowBoldCheck(sliceObject, itemList)}
+
+        def _fieldTableWrite(self, tableObject, itemList, directionObject):
+            directionPageObject = directionObject[tableObject["page"]]
+
+            if directionPageObject["isVertical"] or directionPageObject["isRightToLeft"]:
+                return ""
+
+            cellList = sorted(tableObject["cellList"], key=lambda cellObject: (cellObject["rowIndex"], cellObject["columnIndex"]))
+
+            rowList = []
+
+            countField = 0
+
+            for a in range(len(cellList)):
+                lineList = self._lineGroup(self._itemInsideCollect(itemList, tableObject["page"], cellList[a]["bbox"]), directionObject)
+
+                if len(lineList) == 0:
+                    continue
+
+                bboxFirstList = lineList[0]["bbox"]
+                bboxLastList = lineList[len(lineList) - 1]["bbox"]
+
+                spaceBelow = cellList[a]["bbox"][3] - bboxLastList[3]
+
+                if spaceBelow >= (bboxFirstList[3] - bboxFirstList[1]) * self.levelFieldFree and bboxFirstList[1] - cellList[a]["bbox"][1] <= spaceBelow * self.levelFieldRatio:
+                    countField += 1
+
+                textList = []
+
+                for b in range(1, len(lineList)):
+                    textList.append(self._lineText(lineList[b], directionObject))
+
+                rowList.append([self.markdown._cellEscape(self._lineText(lineList[0], directionObject)), self.markdown._cellEscape(self.markdown._textJoin(textList))])
+
+            if len(rowList) < self.countFieldMinimum or countField < len(rowList) * self.levelFieldShare:
+                return ""
+
+            return self.markdown._tableWrite(["key", "value"], rowList)
+
+        def _tableTitleSplit(self, tableObject, itemList, directionObject):
+            resultList = []
+
+            countRow = self.markdown._gridSize(tableObject["cellList"])["countRow"]
+
+            rowStart = 0
+
+            for a in range(1, countRow - 1):
+                if a == rowStart:
+                    continue
+
+                titleObject = self._tableTitleFind(tableObject, a, itemList, directionObject, rowStart, countRow)
+
+                if titleObject == None:
+                    continue
+
+                resultList.append(self._tableRowSlice(tableObject, rowStart, a, itemList, directionObject))
+                resultList.append(titleObject)
+
+                rowStart = a + 1
+
+            if len(resultList) > 0:
+                resultList.append(self._tableRowSlice(tableObject, rowStart, countRow, itemList, directionObject))
+
+            return resultList
+
         def execute(self, resultObject, extension):
             layoutList = resultObject["layoutList"]
             tableList = resultObject["tableList"]
@@ -1317,17 +1649,19 @@ class Markdown:
 
             self._labelRefine(layoutList, itemList, directionObject)
 
-            formObject = {}
+            layoutList = self._layoutLineSplit(layoutList, directionObject, itemList)
 
-            for a in range(len(resultObject["formList"])):
-                formObject[resultObject["formList"][a]["page"]] = resultObject["formList"][a]["text"]
+            moduleObject = {}
 
-            formWrittenList = []
+            for a in range(len(resultObject["moduleList"])):
+                moduleObject[resultObject["moduleList"][a]["page"]] = resultObject["moduleList"][a]["text"]
+
+            moduleWrittenList = []
 
             itemFlowList = []
 
             for a in range(len(itemList)):
-                if itemList[a]["page"] not in formObject:
+                if itemList[a]["page"] not in moduleObject:
                     itemFlowList.append(itemList[a])
 
             blockList = []
@@ -1360,8 +1694,8 @@ class Markdown:
 
                     continue
 
-                if layoutList[a]["page"] in formObject:
-                    block = self._formWrite(layoutList[a], formObject, formWrittenList)
+                if layoutList[a]["page"] in moduleObject:
+                    block = self._moduleWrite(layoutList[a], moduleObject, moduleWrittenList)
                 else:
                     block = self._blockWrite(layoutList[a], tableList, itemList, directionObject)
 
@@ -1376,10 +1710,24 @@ class Markdown:
                 tableObject = None
                 isHeader = False
 
-                if layoutList[a]["label"] == "table" and layoutList[a]["page"] not in formObject:
+                if layoutList[a]["label"] == "table" and layoutList[a]["page"] not in moduleObject:
                     tableObject = self._tableFind(tableList, layoutList[a])
 
                     if tableObject != None:
+                        fieldText = self._fieldTableWrite(tableObject, itemList, directionObject)
+
+                        if fieldText != "":
+                            blockList.append({"text": fieldText, "isJoinable": False, "page": layoutList[a]["page"], "bbox": layoutList[a]["bbox"], "label": "pair", "tableObject": None})
+
+                            continue
+
+                        partList = self._tableTitleSplit(tableObject, itemList, directionObject)
+
+                        if len(partList) > 0:
+                            blockList = blockList + partList
+
+                            continue
+
                         isHeader = self._rowBoldCheck(tableObject, itemList)
 
                 blockList.append({"text": block, "isJoinable": self._blockJoinable(layoutList[a]), "page": layoutList[a]["page"], "bbox": layoutList[a]["bbox"], "label": layoutList[a]["label"], "tableObject": tableObject, "isHeader": isHeader})
@@ -1404,6 +1752,14 @@ class Markdown:
 
             self.levelTitleSize = 1.15
             self.levelTitleLength = 120
+            self.levelTableTitleAlign = 0.5
+            self.levelFieldFree = 1.0
+            self.levelFieldShare = 0.8
+            self.levelFieldRatio = 0.5
+            self.countFieldMinimum = 2
+            self.levelLineSplitPitch = 1.15
+            self.levelLineOutdent = 0.5
+            self.levelLineOutdentMaximum = 4
             self.levelPairAlign = 0.5
             self.levelPairMatch = 0.5
             self.levelPairWidth = 12
@@ -1497,7 +1853,57 @@ class Markdown:
 
             return resultList
 
+        def _tableSectionList(self, cellList):
+            rowObject = {}
+
+            for a in range(len(cellList)):
+                if cellList[a]["rowSpan"] > 1:
+                    return []
+
+                if cellList[a]["rowIndex"] not in rowObject:
+                    rowObject[cellList[a]["rowIndex"]] = []
+
+                rowObject[cellList[a]["rowIndex"]].append(cellList[a])
+
+            resultList = []
+
+            signaturePrevious = None
+
+            for rowIndex in sorted(rowObject):
+                rowList = sorted(rowObject[rowIndex], key=lambda cellObject: cellObject["columnIndex"])
+
+                signature = [(cellObject["columnIndex"], cellObject["columnSpan"]) for cellObject in rowList]
+
+                if signature != signaturePrevious:
+                    resultList.append([])
+
+                signaturePrevious = signature
+
+                sectionList = resultList[len(resultList) - 1]
+
+                for a in range(len(rowList)):
+                    sectionList.append({"rowIndex": len(sectionList) // len(rowList), "columnIndex": a, "rowSpan": 1, "columnSpan": 1, "text": rowList[a]["text"]})
+
+            return resultList if len(resultList) > 1 else []
+
         def _tableWrite(self, tableObject, directionObject, isHeader):
+            sectionList = self._tableSectionList(tableObject["cellList"])
+
+            if len(sectionList) > 0:
+                textList = []
+
+                for a in range(len(sectionList)):
+                    if self.markdown._gridSize(sectionList[a])["countColumn"] == 1:
+                        for b in range(len(sectionList[a])):
+                            if len(sectionList[a][b]["text"].strip()) > 0:
+                                textList.append(self.markdown._textEscape(sectionList[a][b]["text"].strip()))
+
+                        continue
+
+                    textList.append(self._tableWrite({"cellList": sectionList[a]}, directionObject, isHeader and a == 0))
+
+                return self.markdown.separatorBlock.join(textList)
+
             gridList = self._gridFill(tableObject["cellList"])
 
             if directionObject["isVertical"] or directionObject["isRightToLeft"]:

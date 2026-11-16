@@ -38,13 +38,13 @@ class Raster:
 
         return resultList
 
-    def formCheck(self, pageObject, tablePageList, bboxList):
+    def moduleCheck(self, pageObject, tablePageList, bboxList):
         imageHeight, imageWidth = pageObject["image"].shape[0:2]
 
-        return self.form.pageCheck(tablePageList, imageHeight * imageWidth, bboxList)
+        return self.module.pageCheck(tablePageList, imageHeight * imageWidth, bboxList)
 
-    def formBuild(self, detectionList, image, watermarkObject, numberPage, countStart, pathOutput):
-        resultObject = self.form.itemImageBuild(detectionList, image, self.ocr.recognition, watermarkObject, numberPage)
+    def moduleBuild(self, detectionList, image, watermarkObject, numberPage, countStart, pathOutput):
+        resultObject = self.module.itemImageBuild(detectionList, image, self.ocr.recognition, watermarkObject, numberPage)
 
         itemList = []
         bboxDebugList = []
@@ -65,7 +65,7 @@ class Raster:
         if self.isDebug:
             boxDebugWrite(image, bboxDebugList, f"{pathOutput}debug/ocr/{numberPage}.jpg")
 
-        return {"itemList": itemList, "text": self.form.execute(resultObject["itemList"], resultObject["ringList"], resultObject["lineObject"], [], numberPage)}
+        return {"itemList": itemList, "text": self.module.execute(resultObject["itemList"], resultObject["ringList"], resultObject["lineObject"], [], numberPage)}
 
     def watermarkApply(self, pageObject, pathOutput):
         detectionList = self.ocr.boxDetect(pageObject["image"])
@@ -100,19 +100,19 @@ class Raster:
 
         return resultList + self.detectionBboxList(watermarkObject["detectionZoneList"])
 
-    def itemOcrBuild(self, pageObject, pathOutput, tablePageList, countStart, formList):
+    def itemOcrBuild(self, pageObject, pathOutput, tablePageList, countStart, moduleList):
         ocrObject = self.watermarkApply(pageObject, pathOutput)
 
-        if self.formCheck(pageObject, tablePageList, self.detectionCheckList(ocrObject["detectionList"], ocrObject["watermarkObject"])):
-            formObject = self.formBuild(ocrObject["detectionList"], pageObject["image"], ocrObject["watermarkObject"], pageObject["number"], countStart, pathOutput)
+        if self.moduleCheck(pageObject, tablePageList, self.detectionCheckList(ocrObject["detectionList"], ocrObject["watermarkObject"])):
+            moduleObject = self.moduleBuild(ocrObject["detectionList"], pageObject["image"], ocrObject["watermarkObject"], pageObject["number"], countStart, pathOutput)
 
-            formList.append({"page": pageObject["number"], "text": formObject["text"]})
+            moduleList.append({"page": pageObject["number"], "text": moduleObject["text"]})
 
-            return formObject["itemList"]
+            return moduleObject["itemList"]
 
         return self.ocr.execute(ocrObject["detectionList"], pageObject["image"], tablePageList, ocrObject["watermarkObject"], countStart, pageObject["number"], pathOutput)
 
-    def documentBuild(self, astPageList, pathOutput, countPage, tableList, itemList, formList):
+    def documentBuild(self, astPageList, pathOutput, countPage, tableList, itemList, moduleList):
         self.layout.flowAssign(astPageList)
 
         layoutList = []
@@ -129,16 +129,16 @@ class Raster:
             "layoutList": layoutList,
             "tableList": tableList,
             "itemList": itemList,
-            "formList": formList
+            "moduleList": moduleList
         }
 
-    def __init__(self, isDebug, layout, table, ocr, form, watermark):
+    def __init__(self, isDebug, layout, table, ocr, module, watermark):
         self.isDebug = isDebug
 
         self.layout = layout
         self.table = table
         self.ocr = ocr
-        self.form = form
+        self.module = module
         self.watermark = watermark
 
         self.image = Raster.Image(self)
@@ -162,7 +162,7 @@ class Raster:
             astPageList = []
             tableList = []
             itemList = []
-            formList = []
+            moduleList = []
 
             for a in range(len(pageList)):
                 if job["isCancel"]:
@@ -175,7 +175,7 @@ class Raster:
                 if job["isCancel"]:
                     return {"message": "Job cancelled."}
 
-                itemPageList = self.raster.itemOcrBuild(pageList[a], pathOutput, astObject["tablePageList"], len(itemList), formList)
+                itemPageList = self.raster.itemOcrBuild(pageList[a], pathOutput, astObject["tablePageList"], len(itemList), moduleList)
 
                 if job["isCancel"]:
                     return {"message": "Job cancelled."}
@@ -183,7 +183,7 @@ class Raster:
                 tableList = tableList + self.raster.pageAssemble(astObject["astPage"], itemPageList, astObject["tablePageList"], pageList[a], pathOutput, len(tableList))
                 itemList = itemList + itemPageList
 
-            return self.raster.documentBuild(astPageList, pathOutput, len(pageList), tableList, itemList, formList)
+            return self.raster.documentBuild(astPageList, pathOutput, len(pageList), tableList, itemList, moduleList)
 
         def __init__(self, raster):
             self.numberPageFirst = 1
@@ -219,25 +219,25 @@ class Raster:
 
             return resultList
 
-        def _formPdfBuild(self, pageObject, pageCharObject):
+        def _modulePdfBuild(self, pageObject, pageCharObject):
             numberPage = pageObject["number"]
 
             scale = pageObject["image"].shape[1] / pageCharObject["width"]
 
-            itemFormList = self.raster.form.itemPdfBuild(pageCharObject["elementList"], scale, numberPage)
+            itemModuleList = self.raster.module.itemPdfBuild(pageCharObject["elementList"], scale, numberPage)
 
             detectionList = self.raster.ocr.boxDetect(pageObject["image"])
 
-            ringList = self.raster.form.ringBuild(pageObject["image"], detectionList)
+            ringList = self.raster.module.ringBuild(pageObject["image"], detectionList)
 
-            lineObject = self.raster.form.lineBuild(pageObject["image"], detectionList)
+            lineObject = self.raster.module.lineBuild(pageObject["image"], detectionList)
 
-            circleList = self.raster.form.circleBuild(detectionList, pageCharObject["elementList"], scale)
+            circleList = self.raster.module.circleBuild(detectionList, pageCharObject["elementList"], scale)
 
-            return self.raster.form.execute(itemFormList, ringList, lineObject, circleList, numberPage)
+            return self.raster.module.execute(itemModuleList, ringList, lineObject, circleList, numberPage)
 
         def _pageCharCollect(self, password, pathInput):
-            pageList = self.raster.form.pdfParse(pathInput, password)["pageList"]
+            pageList = self.raster.module.pdfParse(pathInput, password)["pageList"]
 
             resultObject = {}
 
@@ -295,6 +295,11 @@ class Raster:
                     "fontSize": elementList[a]["fontSize"],
                     "isBold": self.labelBold in elementList[a]["fontName"].casefold() if elementList[a]["fontName"] != "" else None
                 })
+
+            resultList = self.raster.module.optionTextApply(resultList, pageReader["elementList"], scaleX)
+
+            for a in range(len(resultList)):
+                resultList[a]["id"] = countStart + a + 1
 
             return resultList
 
@@ -505,7 +510,7 @@ class Raster:
             astPageList = []
             tableList = []
             itemList = []
-            formList = []
+            moduleList = []
 
             pageCharObject = None
 
@@ -527,7 +532,7 @@ class Raster:
                 itemPageList = self._itemBuild(pageReaderObject[numberPage] if numberPage in pageReaderObject else None, pageObject["image"], len(itemList), numberPage)
 
                 if len(itemPageList) == 0:
-                    itemPageList = self.raster.itemOcrBuild(pageObject, pathOutput, astObject["tablePageList"], len(itemList), formList)
+                    itemPageList = self.raster.itemOcrBuild(pageObject, pathOutput, astObject["tablePageList"], len(itemList), moduleList)
                 else:
                     self._debugWrite(itemPageList, pageObject["image"], pathOutput, numberPage)
 
@@ -536,11 +541,11 @@ class Raster:
                     for b in range(len(itemPageList)):
                         bboxList.append(itemPageList[b]["bbox"])
 
-                    if self.raster.formCheck(pageObject, astObject["tablePageList"], bboxList):
+                    if self.raster.moduleCheck(pageObject, astObject["tablePageList"], bboxList):
                         if pageCharObject == None:
                             pageCharObject = self._pageCharCollect(password, pathInput)
 
-                        formList.append({"page": numberPage, "text": self._formPdfBuild(pageObject, pageCharObject[numberPage])})
+                        moduleList.append({"page": numberPage, "text": self._modulePdfBuild(pageObject, pageCharObject[numberPage])})
 
                 if job["isCancel"]:
                     return {"message": "Job cancelled."}
@@ -548,7 +553,7 @@ class Raster:
                 tableList = tableList + self.raster.pageAssemble(astObject["astPage"], itemPageList, astObject["tablePageList"], pageObject, pathOutput, len(tableList))
                 itemList = itemList + itemPageList
 
-            return self.raster.documentBuild(astPageList, pathOutput, len(pageList), tableList, itemList, formList)
+            return self.raster.documentBuild(astPageList, pathOutput, len(pageList), tableList, itemList, moduleList)
 
         def __init__(self, raster):
             self.resolution = "300"

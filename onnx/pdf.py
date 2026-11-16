@@ -43,7 +43,7 @@ def mergeText(elementList):
 
                 isSameLine = abs(element["y0"] - current["y0"]) <= size * 0.6
 
-            isSameLine = isSameLine and current["isVertical"] == element["isVertical"]
+            isSameLine = isSameLine and current["isVertical"] == element["isVertical"] and current.get("fieldIndex", 0) == element.get("fieldIndex", 0)
             isCompatibleSize = elementSize >= size * 0.45 and elementSize <= size * 1.4
             isClose = gap >= -size * 0.3 and gap <= size * 0.6
 
@@ -470,15 +470,14 @@ class Pdf:
         expandedList = []
 
         for a in range(len(resultList)):
+            expandedList.append(resultList[a])
+
             nestedList = self._streamIndirectExpand(resultList[a])
 
             for b in range(len(nestedList)):
                 expandedList.append(nestedList[b])
 
-        for a in range(len(expandedList)):
-            resultList.append(expandedList[a])
-
-        return resultList
+        return expandedList
 
     def _parseValue(self):
         self._skipWhitespace()
@@ -608,6 +607,11 @@ class Pdf:
 
                     if len(octalText) > 0:
                         value += chr(int(octalText, 8) & 0xff)
+                elif nextCode == 13 or nextCode == 10:
+                    self.position += 2
+
+                    if nextCode == 13 and self.position < len(self.byteList) and self.byteList[self.position] == 10:
+                        self.position += 1
                 else:
                     value += chr(nextCode)
                     self.position += 2
@@ -1136,6 +1140,17 @@ class Pdf:
         catalog = self._resolve(rootNode)
         pageRawList = []
 
+        resourceDefaultObject = {}
+
+        if catalog is not None and catalog.get("entryObject") is not None:
+            formNode = self._resolve(catalog["entryObject"].get("AcroForm"))
+
+            if formNode is not None and formNode.get("entryObject") is not None:
+                resourceNode = self._resolve(formNode["entryObject"].get("DR"))
+
+                if resourceNode is not None and resourceNode.get("entryObject") is not None:
+                    resourceDefaultObject = resourceNode["entryObject"]
+
         if catalog is not None and catalog.get("entryObject") is not None:
             self._collectPage(catalog["entryObject"].get("Pages"), {"resourceObject": {}, "mediaBoxList": [0, 0, 595, 842], "cropBoxList": None, "rotate": 0}, pageRawList)
 
@@ -1170,6 +1185,8 @@ class Pdf:
 
             self._interpretContent(content, pageRaw["resourceObject"])
 
+            self._annotationInterpret(pageRaw["entryObject"], resourceDefaultObject)
+
             elementList = self._elementTransform(self.elementList, boxList[0], pageRaw["rotate"], width, height)
 
             if pageRaw["rotate"] == 90 or pageRaw["rotate"] == 270:
@@ -1178,6 +1195,98 @@ class Pdf:
             resultList.append({"number": a + 1, "width": width, "height": height, "rotate": pageRaw["rotate"], "elementList": elementList})
 
         return resultList
+
+    def _annotationInterpret(self, entryObject, resourceDefaultObject):
+        annotationNode = self._resolve(entryObject.get("Annots"))
+
+        if annotationNode is None or annotationNode["kind"] != "array" or annotationNode.get("itemList") is None:
+            return
+
+        for a in range(len(annotationNode["itemList"])):
+            resolved = self._resolve(annotationNode["itemList"][a])
+
+            if resolved is None or resolved.get("entryObject") is None:
+                continue
+
+            annotationObject = resolved["entryObject"]
+
+            subtypeNode = self._resolve(annotationObject.get("Subtype"))
+            appearanceNode = self._resolve(annotationObject.get("AP"))
+
+            rectList = self._boxValue(annotationObject, "Rect")
+
+            if subtypeNode is None or subtypeNode["kind"] != "name" or subtypeNode["value"] != "Widget" or appearanceNode is None or appearanceNode.get("entryObject") is None or rectList is None:
+                continue
+
+            if int(self._numberValue(annotationObject.get("F"))) & self.flagAnnotationHidden != 0:
+                continue
+
+            normalNode = self._resolve(appearanceNode["entryObject"].get("N"))
+
+            if normalNode is not None and normalNode["kind"] == "dictionary" and normalNode.get("entryObject") is not None:
+                stateNode = self._resolve(annotationObject.get("AS"))
+
+                normalNode = self._resolve(normalNode["entryObject"].get(stateNode["value"])) if stateNode is not None and stateNode["kind"] == "name" else None
+
+            if normalNode is None or normalNode["kind"] != "stream" or normalNode.get("content") is None or normalNode.get("entryObject") is None:
+                continue
+
+            boxList = self._boxValue(normalNode["entryObject"], "BBox")
+
+            if boxList is None:
+                continue
+
+            matrixList = [1, 0, 0, 1, 0, 0]
+
+            matrixNode = self._resolve(normalNode["entryObject"].get("Matrix"))
+
+            if matrixNode is not None and matrixNode["kind"] == "array" and matrixNode.get("itemList") is not None and len(matrixNode["itemList"]) == 6:
+                matrixList = [self._numberValue(matrixNode["itemList"][b]) for b in range(6)]
+
+            cornerList = [
+                self._transformPoint(matrixList, boxList[0], boxList[1]),
+                self._transformPoint(matrixList, boxList[2], boxList[1]),
+                self._transformPoint(matrixList, boxList[0], boxList[3]),
+                self._transformPoint(matrixList, boxList[2], boxList[3])
+            ]
+
+            left = min(cornerList[0][0], cornerList[1][0], cornerList[2][0], cornerList[3][0])
+            right = max(cornerList[0][0], cornerList[1][0], cornerList[2][0], cornerList[3][0])
+            bottom = min(cornerList[0][1], cornerList[1][1], cornerList[2][1], cornerList[3][1])
+            top = max(cornerList[0][1], cornerList[1][1], cornerList[2][1], cornerList[3][1])
+
+            scaleX = (rectList[2] - rectList[0]) / (right - left) if right > left else 1
+            scaleY = (rectList[3] - rectList[1]) / (top - bottom) if top > bottom else 1
+
+            resourceObject = resourceDefaultObject
+
+            resourceNode = self._resolve(normalNode["entryObject"].get("Resources"))
+
+            if resourceNode is not None and resourceNode.get("entryObject") is not None:
+                resourceObject = resourceNode["entryObject"]
+
+            self.ctmList = self._matrixMultiply([scaleX, 0, 0, scaleY, rectList[0] - left * scaleX, rectList[1] - bottom * scaleY], matrixList)
+            self.textMatrixList = [1, 0, 0, 1, 0, 0]
+            self.lineMatrixList = [1, 0, 0, 1, 0, 0]
+            self.graphicsStateList = []
+            self.fontSize = 0
+            self.charSpacing = 0
+            self.wordSpacing = 0
+            self.horizontalScale = 1
+            self.leading = 0
+            self.textRender = 0
+            self.textRise = 0
+            self.fillColor = "#000000"
+            self.strokeColor = "#000000"
+            self.currentFont = None
+            self._pathReset()
+
+            countElement = len(self.elementList)
+
+            self._interpretContent(normalNode["content"], resourceObject)
+
+            for b in range(countElement, len(self.elementList)):
+                self.elementList[b]["fieldIndex"] = a + 1
 
     def _elementTransform(self, elementList, offsetX, rotate, width, height):
         for a in range(len(elementList)):
@@ -1308,6 +1417,8 @@ class Pdf:
         self.isPathEmpty = True
         self.isPathRectangle = False
         self.isPathCurve = False
+        self.isPathPolygon = True
+        self.pathPointList = []
 
     def _pageContent(self, entryObject):
         result = ""
@@ -1774,6 +1885,11 @@ class Pdf:
 
             if operator == "c" or operator == "v" or operator == "y":
                 self.isPathCurve = True
+                self.isPathPolygon = False
+            elif operator == "m" and len(self.pathPointList) > 0:
+                self.isPathPolygon = False
+            else:
+                self.pathPointList.append(self._transformPoint(self.ctmList, number(2), number(1)))
         elif operator == "re":
             x = number(4)
             y = number(3)
@@ -1785,6 +1901,7 @@ class Pdf:
             self._pathAddPoint(x + width, y + height)
 
             self.isPathRectangle = wasEmpty
+            self.isPathPolygon = False
         elif operator == "f" or operator == "F" or operator == "f*":
             self._pathPaint(True, False)
         elif operator == "S" or operator == "s":
@@ -1986,10 +2103,35 @@ class Pdf:
             self.pathMaxX = max(self.pathMaxX, pointList[0])
             self.pathMaxY = max(self.pathMaxY, pointList[1])
 
+    def _pathBoxCheck(self):
+        pointList = self.pathPointList
+
+        margin = min(self.pathMaxX - self.pathMinX, self.pathMaxY - self.pathMinY) * self.levelPathBox
+
+        if self.isPathPolygon == False or len(pointList) < 4 or len(pointList) > 5 or margin <= 0:
+            return False
+
+        if len(pointList) == 5 and (abs(pointList[4][0] - pointList[0][0]) > margin or abs(pointList[4][1] - pointList[0][1]) > margin):
+            return False
+
+        for a in range(4):
+            pointNextList = pointList[(a + 1) % 4]
+
+            isCornerX = abs(pointList[a][0] - self.pathMinX) <= margin or abs(pointList[a][0] - self.pathMaxX) <= margin
+            isCornerY = abs(pointList[a][1] - self.pathMinY) <= margin or abs(pointList[a][1] - self.pathMaxY) <= margin
+
+            isSameX = abs(pointList[a][0] - pointNextList[0]) <= margin
+            isSameY = abs(pointList[a][1] - pointNextList[1]) <= margin
+
+            if isCornerX == False or isCornerY == False or isSameX == isSameY:
+                return False
+
+        return True
+
     def _pathPaint(self, isFill, isStroke):
         if self.isPathEmpty == False:
             self.elementList.append({
-                "type": "rect" if self.isPathRectangle else "path",
+                "type": "rect" if self.isPathRectangle or (isStroke and isFill == False and self._pathBoxCheck()) else "path",
                 "x0": self.pathMinX,
                 "y0": self.pageHeight - self.pathMaxY,
                 "x1": self.pathMaxX,
@@ -2038,6 +2180,10 @@ class Pdf:
         self.versionEncryptList = [1, 2, 4, 5]
 
         self.levelTextShift = 0.4
+
+        self.flagAnnotationHidden = 2 | 32
+
+        self.levelPathBox = 0.05
 
         self.messageEncryption = "Encryption not supported."
         self.messagePasswordRequired = "Password required."

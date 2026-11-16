@@ -11,7 +11,7 @@ sys.dont_write_bytecode = True
 import layout
 import table
 import ocr
-import form
+import module
 import watermark
 import raster
 import office
@@ -128,9 +128,9 @@ class Engine:
         self.layout = layout.Layout(self.isDebug)
         self.table = table.Table(self.isDebug)
         self.ocr = ocr.Ocr(self.isDebug)
-        self.form = form.Form()
+        self.module = module.Module()
         self.watermark = watermark.Watermark()
-        self.raster = raster.Raster(self.isDebug, self.layout, self.table, self.ocr, self.form, self.watermark)
+        self.raster = raster.Raster(self.isDebug, self.layout, self.table, self.ocr, self.module, self.watermark)
         self.office = office.Office(self.isDebug)
         self.markdown = markdown.Markdown(self.extensionObject, self.office)
 

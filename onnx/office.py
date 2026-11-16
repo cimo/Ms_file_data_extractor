@@ -110,6 +110,24 @@ class Office:
         if tag == tagSkip:
             return result
 
+        if tag == "sdt":
+            for propertyNode in node.iter():
+                tagProperty = self._xmlNodeTag(propertyNode)
+
+                if tagProperty == "showingPlcHdr":
+                    return result
+
+                if tagProperty == "checkbox":
+                    isChecked = False
+
+                    for checkNode in propertyNode:
+                        if self._xmlNodeTag(checkNode) == "checked":
+                            for name in checkNode.attrib:
+                                if name.endswith("}val") and checkNode.attrib[name] not in self.valueFalseList:
+                                    isChecked = True
+
+                    return self.textMark if isChecked else self.textOption
+
         if tag == "t":
             result += node.text if node.text is not None else ""
         elif tag in characterObject:
@@ -414,6 +432,9 @@ class Office:
 
         self.valueFalseList = ["0", "false"]
 
+        self.textMark = "[x]"
+        self.textOption = "[ ]"
+
         self.patternTabulation = r"[ ]*\t[ \t]*"
 
         self.readerObject = {
@@ -701,6 +722,10 @@ class Office:
 
             columnMax = 0
             isData = len(rowNodeList) >= 2
+            isLong = False
+
+            countRow = 0
+            countField = 0
 
             rowCellList = []
             openObject = {}
@@ -728,7 +753,7 @@ class Office:
                                 textList.append(text)
 
                                 if len(text) > self.levelAsideLength:
-                                    isData = False
+                                    isLong = True
                         elif tag == "tbl":
                             isData = False
 
@@ -752,7 +777,19 @@ class Office:
 
                 rowCellList.append(cellList)
 
-            if columnMax < 2:
+                countEmpty = 0
+
+                for b in range(len(cellList)):
+                    if cellList[b]["text"] == "":
+                        countEmpty += 1
+
+                if len(cellList) >= 2:
+                    countRow += 1
+
+                    if countEmpty > 0 and countEmpty < len(cellList):
+                        countField += 1
+
+            if columnMax < 2 or (isLong and countField * 2 < countRow):
                 isData = False
 
             if isData:
