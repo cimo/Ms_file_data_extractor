@@ -5,6 +5,7 @@ import icu
 import json
 import numpy
 import hashlib
+import unicodedata
 
 stderrFileDescriptor = os.dup(2)
 nullFileDescriptor = os.open(os.devnull, os.O_WRONLY)
@@ -98,6 +99,26 @@ def wideCheck(character):
         return False
 
     return icu.Char.getIntPropertyValue(character, icu.UProperty.EAST_ASIAN_WIDTH) in widthWideList
+
+def categoryContainCheck(text, categoryList):
+    for a in range(len(text)):
+        category = unicodedata.category(text[a])
+
+        if category in categoryList or category[0] in categoryList:
+            return True
+
+    return False
+
+def categoryRemove(text, categoryList):
+    result = ""
+
+    for a in range(len(text)):
+        category = unicodedata.category(text[a])
+
+        if category not in categoryList and category[0] not in categoryList:
+            result += text[a]
+
+    return result
 
 def spacelessCheck(character):
     if wideCheck(character):
@@ -272,19 +293,41 @@ def spaceSkipCheck(textPrevious, text):
 
     return wideCheck(textPrevious[-1:]) and wideCheck(text[0:1])
 
-def sentenceEndCheck(text, levelReferenceLength):
-    textClean = sentenceTailStrip(text, levelReferenceLength)
+def gapMedianCalculate(charList):
+    gapList = []
+
+    for a in range(1, len(charList)):
+        gapList.append(charList[a]["start"] - charList[a - 1]["end"])
+
+    gapList.sort()
+
+    return gapList[int(len(gapList) / 2)] if len(gapList) > 0 else 0
+
+def spaceGapCheck(characterPrevious, characterNext, gap, size, spaceWidth, gapMedian):
+    if wideCheck(characterPrevious) and wideCheck(characterNext):
+        return False
+
+    if gap > size * levelSpaceChar:
+        return True
+
+    if unicodedata.category(characterPrevious) == "Nd" and unicodedata.category(characterNext) == "Nd":
+        return False
+
+    return spaceWidth > 0 and gapMedian < spaceWidth * levelSpaceWord and gap > spaceWidth * levelSpaceWord
+
+def sentenceEndCheck(text):
+    textClean = sentenceTailStrip(text)
 
     return len(textClean) > 0 and icu.Char.hasBinaryProperty(textClean[-1:], icu.UProperty.S_TERM)
 
-def sentenceTailStrip(text, levelReferenceLength):
+def sentenceTailStrip(text):
     result = text.strip()
 
     while len(result) > 0:
         character = result[-1:]
 
         if icu.Char.charType(character) == icu.UCharCategory.END_PUNCTUATION:
-            indexOpen = groupOpenIndex(result, levelReferenceLength)
+            indexOpen = groupOpenIndex(result)
 
             result = result[0:indexOpen] if indexOpen >= 0 else result[0:-1]
 
@@ -299,7 +342,7 @@ def sentenceTailStrip(text, levelReferenceLength):
 
     return result
 
-def groupOpenIndex(text, levelReferenceLength):
+def groupOpenIndex(text):
     for a in range(len(text) - 2, len(text) - 2 - levelReferenceLength, -1):
         if a < 0:
             break
@@ -324,11 +367,81 @@ def boxFromPointList(pointList):
 
     return [min(xList), min(yList), max(xList), max(yList)]
 
+def boxExpand(bboxList, bboxOtherList):
+    return [
+        min(bboxList[0], bboxOtherList[0]),
+        min(bboxList[1], bboxOtherList[1]),
+        max(bboxList[2], bboxOtherList[2]),
+        max(bboxList[3], bboxOtherList[3])
+    ]
+
+def boxSizeMedian(bboxList):
+    sizeList = []
+
+    for a in range(len(bboxList)):
+        sizeList.append(min(bboxList[a][2] - bboxList[a][0], bboxList[a][3] - bboxList[a][1]))
+
+    sizeList.sort()
+
+    return sizeList[int(len(sizeList) / 2)] if len(sizeList) > 0 else 1
+
+def detectionBoxBuild(detectionList):
+    resultList = []
+
+    for a in range(len(detectionList)):
+        resultList.append(boxFromPointList(detectionList[a]["coordinate"]))
+
+    return resultList
+
+def textCutCheck(bboxList, bboxCellList):
+    if min(bboxList[3], bboxCellList[3]) - max(bboxList[1], bboxCellList[1]) < (bboxList[3] - bboxList[1]) * levelCutOverlap:
+        return False
+
+    margin = (bboxList[2] - bboxList[0]) * levelCutMargin
+
+    for a in range(2):
+        edge = bboxCellList[a * 2]
+
+        if edge > bboxList[0] + margin and edge < bboxList[2] - margin:
+            return True
+
+    return False
+
+def columnGroupAppend(columnList, index, bboxList, itemObject):
+    if index < 0:
+        columnList.append({"x1": bboxList[0], "x2": bboxList[2], "itemList": [itemObject]})
+
+        return
+
+    columnList[index]["x1"] = min(columnList[index]["x1"], bboxList[0])
+    columnList[index]["x2"] = max(columnList[index]["x2"], bboxList[2])
+
+    columnList[index]["itemList"].append(itemObject)
+
 def centerPointCalculate(bboxList):
     return {
         "x": int(round((bboxList[0] + bboxList[2]) / 2)),
         "y": int(round((bboxList[1] + bboxList[3]) / 2))
     }
+
+def sizeDominantCalculate(itemList):
+    countObject = {}
+
+    for a in range(len(itemList)):
+        if "fontSize" not in itemList[a]:
+            continue
+
+        countObject[itemList[a]["fontSize"]] = countObject.get(itemList[a]["fontSize"], 0) + len(itemList[a]["text"])
+
+    result = 0
+    countBest = 0
+
+    for size in countObject:
+        if countObject[size] > countBest:
+            result = size
+            countBest = countObject[size]
+
+    return result
 
 def boxCenterInsideCheck(bboxList, boxOuterList):
     centerX = (bboxList[0] + bboxList[2]) / 2
@@ -379,7 +492,7 @@ def boxIou(bboxList, bboxOtherList):
 
     return areaIntersection / float(boxArea(bboxList) + boxArea(bboxOtherList) - areaIntersection)
 
-def boxContainedRemove(boxList, nameKey, levelContained):
+def boxContainedRemove(boxList, nameKey):
     resultList = []
 
     for a in range(len(boxList)):
@@ -394,7 +507,7 @@ def boxContainedRemove(boxList, nameKey, levelContained):
             if boxArea(boxList[b][nameKey]) <= area:
                 continue
 
-            if boxIntersection(boxList[a][nameKey], boxList[b][nameKey]) / float(area) >= levelContained:
+            if boxIntersection(boxList[a][nameKey], boxList[b][nameKey]) / float(area) >= levelBoxContained:
                 isContained = True
 
                 break
@@ -450,6 +563,34 @@ def boxDebugWrite(image, bboxList, pathFile):
 
 mediaSideMax = 1280
 mediaQuality = 80
+
+levelSpaceChar = 1.0
+levelSpaceWord = 0.5
+levelSpaceGap = 0.15
+levelBoxContained = 0.9
+levelBoxNms = 0.5
+levelVerticalRatio = 2.0
+levelColumnOverlap = 0.5
+levelLineDouble = 1.7
+levelRuleLength = 1.5
+levelTitleSize = 1.15
+levelTitleLength = 120
+levelReferenceLength = 20
+levelCutOverlap = 0.5
+levelCutMargin = 0.15
+
+textOptionMark = "[x]"
+textOptionEmpty = "[ ]"
+textBullet = "- "
+
+separatorOption = " / "
+
+categoryLetterList = ["L"]
+categoryOperatorList = ["Sm", "Pd"]
+categoryCasedList = ["Lu", "Ll", "Lt"]
+categoryWordList = ["L", "Nd"]
+categoryBlankList = ["Zs", "Cc"]
+categorySkeletonList = ["Nd", "Z", "Cc"]
 
 widthWideList = [icu.Char.getPropertyValueEnum(icu.UProperty.EAST_ASIAN_WIDTH, "W"), icu.Char.getPropertyValueEnum(icu.UProperty.EAST_ASIAN_WIDTH, "F")]
 lineBreakComplex = icu.Char.getPropertyValueEnum(icu.UProperty.LINE_BREAK, "SA")

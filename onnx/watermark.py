@@ -5,19 +5,9 @@ import numpy
 sys.dont_write_bytecode = True
 
 # Source
-from helper import boxFromPointList, boxArea, boxIntersection, imageInkBuild
+from helper import boxFromPointList, boxArea, boxIntersection, imageInkBuild, levelLineDouble, levelRuleLength, boxSizeMedian
 
 class Watermark:
-    def _heightBoxMedian(self, bboxList):
-        sizeList = []
-
-        for a in range(len(bboxList)):
-            sizeList.append(min(bboxList[a][2] - bboxList[a][0], bboxList[a][3] - bboxList[a][1]))
-
-        sizeList.sort()
-
-        return sizeList[int(len(sizeList) / 2)]
-
     def _thresholdOtsu(self, valueList):
         return cv2.threshold(valueList.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]
 
@@ -99,7 +89,7 @@ class Watermark:
 
         inkRule = (imageGray < (levelObject["thresholdDark"] + grayWatermark) / 2).astype(numpy.uint8) * 255
 
-        length = max(1, int(round(height * self.levelRuleLength)))
+        length = max(1, int(round(height * levelRuleLength)))
 
         return cv2.morphologyEx(inkRule, cv2.MORPH_OPEN, numpy.ones((1, length), numpy.uint8)) | cv2.morphologyEx(inkRule, cv2.MORPH_OPEN, numpy.ones((length, 1), numpy.uint8))
 
@@ -158,7 +148,7 @@ class Watermark:
             isDuplicate = False
 
             for b in range(len(bboxKeepList)):
-                if boxIntersection(bboxList, bboxKeepList[b]) >= area * self.levelDuplicate:
+                if boxIntersection(bboxList, bboxKeepList[b]) >= area * self.levelDuplicateBox:
                     isDuplicate = True
 
                     break
@@ -189,14 +179,14 @@ class Watermark:
             bboxList = bboxCleanList[a]
 
             for b in range(len(bboxDropList)):
-                if not self._overlapCheck(bboxList, bboxDropList[b]) or not self._heightSimilarCheck(bboxList, bboxDropList[b]) or not self._rowSameCheck(bboxList, bboxDropList[b], self.levelRowOverlap):
+                if not self._overlapCheck(bboxList, bboxDropList[b]) or not self._heightSimilarCheck(bboxList, bboxDropList[b]) or not self._rowSameCheck(bboxList, bboxDropList[b], self.levelRowBoxOverlap):
                     continue
 
                 left = min(bboxList[0], bboxDropList[b][0])
                 right = max(bboxList[2], bboxDropList[b][2])
 
                 for c in range(len(detectionCleanList)):
-                    if c == a or not self._rowSameCheck(bboxList, bboxCleanList[c], self.levelDuplicate) or not self._heightSimilarCheck(bboxList, bboxCleanList[c]):
+                    if c == a or not self._rowSameCheck(bboxList, bboxCleanList[c], self.levelDuplicateBox) or not self._heightSimilarCheck(bboxList, bboxCleanList[c]):
                         continue
 
                     if bboxCleanList[c][0] < bboxList[0] and bboxCleanList[c][2] > left:
@@ -270,7 +260,7 @@ class Watermark:
         for a in range(len(detectionCleanList)):
             bboxList = bboxCleanList[a]
 
-            if bboxList[3] - bboxList[1] < height * self.levelLineDouble:
+            if bboxList[3] - bboxList[1] < height * levelLineDouble:
                 resultList.append(detectionCleanList[a])
 
                 continue
@@ -287,7 +277,7 @@ class Watermark:
             for b in range(len(detectionCleanList)):
                 bboxOtherList = bboxCleanList[b]
 
-                if b == a or bboxOtherList[3] - bboxOtherList[1] >= height * self.levelLineDouble or bboxOtherList[0] >= bboxList[2] or bboxOtherList[2] <= bboxList[0]:
+                if b == a or bboxOtherList[3] - bboxOtherList[1] >= height * levelLineDouble or bboxOtherList[0] >= bboxList[2] or bboxOtherList[2] <= bboxList[0]:
                     continue
 
                 if (bboxOtherList[1] + bboxOtherList[3]) / 2 > centerY and bboxOtherList[1] < bboxList[3]:
@@ -389,7 +379,7 @@ class Watermark:
                 detectionDropList.append(detectionList[a])
                 bboxDropList.append(bboxDetectionList)
 
-        height = self._heightBoxMedian(bboxList)
+        height = boxSizeMedian(bboxList)
 
         detectionCleanList = self._cleanExtend(self._cleanTrim(self._cleanCollect(detectionCleanList, bboxKeepList, zone, bboxDropList), height, image), bboxDropList, height)
 
@@ -408,7 +398,7 @@ class Watermark:
         if len(bboxList) == 0:
             return {"isFound": False}
 
-        height = self._heightBoxMedian(bboxList)
+        height = boxSizeMedian(bboxList)
 
         imageGray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -448,12 +438,10 @@ class Watermark:
         self.levelGrow = 1.0
         self.levelZoneSize = 3.0
         self.levelZoneStroke = 0.2
-        self.levelRuleLength = 1.5
         self.levelSpeck = 0.1
-        self.levelDuplicate = 0.5
+        self.levelDuplicateBox = 0.5
         self.levelScore = 0.75
         self.levelRowHeight = 0.5
-        self.levelRowOverlap = 0.7
+        self.levelRowBoxOverlap = 0.7
         self.levelExtendMinimum = 0.5
-        self.levelLineDouble = 1.7
         self.levelCrossSide = 0.25

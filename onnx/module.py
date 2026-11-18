@@ -9,188 +9,7 @@ sys.dont_write_bytecode = True
 # Source
 import pdf
 import reference
-from helper import boxFromPointList, imageInkBuild, boxCenterInsideCheck
-
-class PdfChar(pdf.Pdf):
-    levelSplit = 1.5
-    levelSpace = 1.0
-    levelSpaceWord = 0.5
-
-    def spaceCheck(gap, gapMedian, size, spaceWidth, characterPrevious, characterNext):
-        if unicodedata.east_asian_width(characterPrevious) in ["W", "F"] and unicodedata.east_asian_width(characterNext) in ["W", "F"]:
-            return False
-
-        if gap > size * PdfChar.levelSpace:
-            return True
-
-        if unicodedata.category(characterPrevious) == "Nd" and unicodedata.category(characterNext) == "Nd":
-            return False
-
-        return spaceWidth > 0 and gapMedian < spaceWidth * PdfChar.levelSpaceWord and gap > spaceWidth * PdfChar.levelSpaceWord
-
-    def gapMedian(charList):
-        gapList = []
-
-        for a in range(1, len(charList)):
-            gapList.append(charList[a]["start"] - charList[a - 1]["end"])
-
-        gapList.sort()
-
-        return gapList[int(len(gapList) / 2)] if len(gapList) > 0 else 0
-
-    def _fontDecode(self, raw, font):
-        resultObject = pdf.Pdf._fontDecode(self, raw, font)
-
-        if font["byteLength"] != 2 or font["isCidResolved"] or font["isUnicodeCode"] == False:
-            return resultObject
-
-        for a in range(len(resultObject["charList"])):
-            character = resultObject["charList"][a]
-
-            if len(character) > 0 and unicodedata.east_asian_width(character[0]) in ["Na", "H"]:
-                resultObject["widthFractionList"][a] = font["defaultWidthFraction"] / 2
-
-        return resultObject
-
-    def _showText(self, partList, font):
-        charList = []
-
-        advance = 0
-
-        for a in range(len(partList)):
-            part = partList[a]
-
-            if part["kind"] == "string" or part["kind"] == "hexString":
-                decoded = self._fontDecode(part["value"], font)
-
-                for b in range(len(decoded["charList"])):
-                    start = advance
-
-                    if font["isVertical"]:
-                        code = decoded["codeList"][b]
-
-                        fraction = font["verticalObject"][code] if font["isCidResolved"] and code in font["verticalObject"] else font["verticalFraction"]
-
-                        size = fraction * self.fontSize
-
-                        advance += size + self.charSpacing
-                    else:
-                        size = decoded["widthFractionList"][b] * self.fontSize * self.horizontalScale
-
-                        glyph = decoded["widthFractionList"][b] * self.fontSize + self.charSpacing
-
-                        if font["byteLength"] == 1 and decoded["codeList"][b] == 32:
-                            glyph += self.wordSpacing
-
-                        advance += glyph * self.horizontalScale
-
-                    charList.append({"text": decoded["charList"][b], "start": start, "end": start + size})
-            elif part["kind"] == "number":
-                advance -= part["value"] / 1000 * self.fontSize * (1 if font["isVertical"] else self.horizontalScale)
-
-        renderMatrixList = self._matrixMultiply(self.ctmList, self.textMatrixList)
-        deviceFontSize = self.fontSize * math.hypot(renderMatrixList[2], renderMatrixList[3])
-
-        spaceAdvance = 0
-
-        if font["byteLength"] == 1 and font["isVertical"] == False:
-            spaceAdvance = pdf.Pdf._fontDecode(self, " ", font)["widthFractionList"][0] * self.fontSize * self.horizontalScale
-
-        if self.textRender != 3 and self.textRender != 7:
-            pieceList = []
-
-            isSpace = False
-
-            for a in range(len(charList)):
-                if len(charList[a]["text"].strip()) == 0:
-                    isSpace = True
-
-                    continue
-
-                charList[a]["isSpaceBefore"] = isSpace
-
-                isSpace = False
-
-                if len(pieceList) > 0 and charList[a]["start"] - pieceList[len(pieceList) - 1]["end"] <= self.fontSize * self.levelSplit:
-                    pieceObject = pieceList[len(pieceList) - 1]
-
-                    pieceObject["end"] = charList[a]["end"]
-                    pieceObject["charList"].append(charList[a])
-
-                    continue
-
-                pieceList.append({"text": "", "start": charList[a]["start"], "end": charList[a]["end"], "charList": [charList[a]]})
-
-            for a in range(len(pieceList)):
-                pieceCharList = pieceList[a]["charList"]
-
-                gapMedian = PdfChar.gapMedian(pieceCharList)
-
-                for b in range(len(pieceCharList)):
-                    if b > 0:
-                        characterPrevious = pieceCharList[b - 1]["text"][-1]
-                        characterNext = pieceCharList[b]["text"][0]
-
-                        isNarrow = unicodedata.east_asian_width(characterPrevious) not in ["W", "F"] and unicodedata.east_asian_width(characterNext) not in ["W", "F"]
-
-                        if (pieceCharList[b]["isSpaceBefore"] and isNarrow) or PdfChar.spaceCheck(pieceCharList[b]["start"] - pieceCharList[b - 1]["end"], gapMedian, self.fontSize, spaceAdvance, characterPrevious, characterNext):
-                            pieceList[a]["text"] += " "
-
-                    pieceList[a]["text"] += pieceCharList[b]["text"]
-
-            for a in range(len(pieceList)):
-                start = pieceList[a]["start"]
-                end = pieceList[a]["end"]
-
-                if font["isVertical"]:
-                    cornerList = [
-                        self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise - start),
-                        self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise - start),
-                        self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise - end),
-                        self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise - end)
-                    ]
-                else:
-                    cornerList = [
-                        self._transformPoint(renderMatrixList, start, self.textRise - self.fontSize * 0.2),
-                        self._transformPoint(renderMatrixList, end, self.textRise - self.fontSize * 0.2),
-                        self._transformPoint(renderMatrixList, end, self.textRise + self.fontSize * 0.8),
-                        self._transformPoint(renderMatrixList, start, self.textRise + self.fontSize * 0.8)
-                    ]
-
-                bboxList = boxFromPointList(cornerList)
-
-                charBoxList = []
-
-                for b in range(len(pieceList[a]["charList"])):
-                    charObject = pieceList[a]["charList"][b]
-
-                    if font["isVertical"]:
-                        pointStart = self._transformPoint(renderMatrixList, 0, self.textRise - charObject["start"])
-                        pointEnd = self._transformPoint(renderMatrixList, 0, self.textRise - charObject["end"])
-
-                        charBoxList.append({"text": charObject["text"], "start": self.pageHeight - pointStart[1], "end": self.pageHeight - pointEnd[1]})
-                    else:
-                        pointStart = self._transformPoint(renderMatrixList, charObject["start"], self.textRise)
-                        pointEnd = self._transformPoint(renderMatrixList, charObject["end"], self.textRise)
-
-                        charBoxList.append({"text": charObject["text"], "start": pointStart[0], "end": pointEnd[0]})
-
-                self.elementList.append({
-                    "type": "text",
-                    "charList": charBoxList,
-                    "text": pieceList[a]["text"],
-                    "x0": bboxList[0],
-                    "y0": self.pageHeight - bboxList[3],
-                    "x1": bboxList[2],
-                    "y1": self.pageHeight - bboxList[1],
-                    "fontName": font["baseFont"],
-                    "fontSize": math.floor(deviceFontSize * 100 + 0.5) / 100,
-                    "spaceWidth": spaceAdvance * deviceFontSize / self.fontSize if self.fontSize != 0 else 0,
-                    "isVertical": font["isVertical"],
-                    "color": self.fillColor
-                })
-
-        self.textMatrixList = self._matrixMultiply(self.textMatrixList, [1, 0, 0, 1, 0, -advance] if font["isVertical"] else [1, 0, 0, 1, advance, 0])
+from helper import imageInkBuild, boxCenterInsideCheck, gapMedianCalculate, spaceGapCheck, levelSpaceChar, levelLineDouble, levelRuleLength, textOptionMark, textOptionEmpty, boxExpand, detectionBoxBuild, boxSizeMedian, wideCheck, boxIou, textBullet, separatorOption, categoryContainCheck, categoryRemove, categoryOperatorList, categoryLetterList, categoryBlankList, categorySkeletonList, columnGroupAppend
 
 class Module:
     def _duplicateRemove(self, charList):
@@ -200,7 +19,7 @@ class Module:
             isDuplicate = False
 
             for b in range(len(resultList)):
-                if resultList[b]["text"] == charList[a]["text"] and self._iou(resultList[b]["bbox"], charList[a]["bbox"]) >= self.levelDuplicate:
+                if resultList[b]["text"] == charList[a]["text"] and boxIou(resultList[b]["bbox"], charList[a]["bbox"]) >= self.levelDuplicate:
                     isDuplicate = True
 
                     break
@@ -254,28 +73,18 @@ class Module:
         for a in range(len(resultList)):
             resultObject = resultList[a]
 
-            gapMedian = PdfChar.gapMedian(resultObject["charList"]) if resultObject["isVertical"] == False else 0
+            gapMedian = gapMedianCalculate(resultObject["charList"]) if resultObject["isVertical"] == False else 0
 
             for b in range(len(resultObject["partList"])):
                 partObject = resultObject["partList"][b]
 
                 textCurrent = resultObject["text"]
 
-                isSpace = len(textCurrent) > 0 and len(partObject["text"]) > 0 and PdfChar.spaceCheck(partObject["gap"], gapMedian, resultObject["fontSize"], resultObject.get("spaceWidth", 0), textCurrent[-1], partObject["text"][0])
+                isSpace = len(textCurrent) > 0 and len(partObject["text"]) > 0 and spaceGapCheck(textCurrent[-1], partObject["text"][0], partObject["gap"], resultObject["fontSize"], resultObject.get("spaceWidth", 0), gapMedian)
 
                 resultObject["text"] = f"{textCurrent} {partObject['text']}" if isSpace else f"{textCurrent}{partObject['text']}"
 
         return resultList
-
-    def _heightBoxMedian(self, bboxList):
-        sizeList = []
-
-        for a in range(len(bboxList)):
-            sizeList.append(min(bboxList[a][2] - bboxList[a][0], bboxList[a][3] - bboxList[a][1]))
-
-        sizeList.sort()
-
-        return sizeList[int(len(sizeList) / 2)] if len(sizeList) > 0 else 1
 
     def _runList(self, profileList, isEmptyList):
         resultList = []
@@ -419,7 +228,7 @@ class Module:
         return resultList
 
     def _lineSplit(self, bboxList, imageInk, height):
-        if bboxList[3] - bboxList[1] < height * self.levelLineDouble:
+        if bboxList[3] - bboxList[1] < height * levelLineDouble:
             return [bboxList]
 
         x1 = max(0, int(bboxList[0]))
@@ -517,7 +326,7 @@ class Module:
         for a in range(len(horizontalList)):
             bboxList = horizontalList[a]
 
-            if bboxList[2] - bboxList[0] >= height * self.levelRuleLength:
+            if bboxList[2] - bboxList[0] >= height * levelRuleLength:
                 resultList.append(bboxList)
 
                 continue
@@ -552,7 +361,7 @@ class Module:
         for a in range(1, count):
             x, y, width, heightLine = statList[a][0:4]
 
-            if heightLine >= height * self.levelRuleLength or (width > height * self.levelRuleThick and heightLine < width * self.levelRuleAspect):
+            if heightLine >= height * levelRuleLength or (width > height * self.levelRuleThick and heightLine < width * self.levelRuleAspect):
                 continue
 
             isKnown = False
@@ -572,7 +381,7 @@ class Module:
             for b in range(len(horizontalList)):
                 bboxList = horizontalList[b]
 
-                if bboxList[2] - bboxList[0] < height * self.levelRuleLength or bboxList[0] > x + width + reach or bboxList[2] < x - reach:
+                if bboxList[2] - bboxList[0] < height * levelRuleLength or bboxList[0] > x + width + reach or bboxList[2] < x - reach:
                     continue
 
                 if abs((bboxList[1] + bboxList[3]) / 2 - y) <= reach:
@@ -589,7 +398,7 @@ class Module:
     def _lineCollect(self, image, height):
         imageInk = cv2.adaptiveThreshold(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), 1, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, int(height) * 2 + 1, self.levelRuleContrast)
 
-        imageVertical = cv2.morphologyEx(imageInk, cv2.MORPH_OPEN, numpy.ones((max(1, int(round(height * self.levelRuleLength))), 1), numpy.uint8))
+        imageVertical = cv2.morphologyEx(imageInk, cv2.MORPH_OPEN, numpy.ones((max(1, int(round(height * levelRuleLength))), 1), numpy.uint8))
         imageHorizontal = cv2.morphologyEx(imageInk, cv2.MORPH_OPEN, numpy.ones((1, max(1, int(round(height * self.levelRuleLengthHorizontal)))), numpy.uint8))
 
         resultObject = {"verticalList": [], "horizontalList": []}
@@ -639,7 +448,7 @@ class Module:
     def _dashCollect(self, height, imageInk, horizontalList):
         thickness = max(1, int(round(height * self.levelRuleThick)))
         gap = max(1, int(round(height * self.levelDashGap)))
-        length = max(1, int(round(height * self.levelRuleLength)))
+        length = max(1, int(round(height * levelRuleLength)))
 
         imageWide = cv2.morphologyEx(imageInk, cv2.MORPH_OPEN, numpy.ones((1, thickness + 1), numpy.uint8))
         imageThin = imageInk - imageWide
@@ -886,16 +695,132 @@ class Module:
         return count
 
     def _wallCheck(self, lineList, start, end, bboxList):
+        return self._wallCount(lineList, start, end, bboxList) > 0
+
+    def _wallSideFind(self, bboxList, lineList):
+        centerX = (bboxList[0] + bboxList[2]) / 2
+
+        left = None
+        right = None
+
         for a in range(len(lineList)):
             bboxLineList = lineList[a]
 
-            if bboxLineList[2] <= start or bboxLineList[0] >= end:
+            if self._overlap(bboxLineList[1], bboxLineList[3], bboxList[1], bboxList[3]) < (bboxList[3] - bboxList[1]) * self.levelLineCover:
                 continue
 
-            if self._overlap(bboxLineList[1], bboxLineList[3], bboxList[1], bboxList[3]) >= (bboxList[3] - bboxList[1]) * self.levelLineCover:
-                return True
+            if bboxLineList[2] <= centerX and (left == None or bboxLineList[2] > left):
+                left = bboxLineList[2]
 
-        return False
+            if bboxLineList[0] >= centerX and (right == None or bboxLineList[0] < right):
+                right = bboxLineList[0]
+
+        return [left, right]
+
+    def _columnCenterAppend(self, columnList, centerX, height, itemObject):
+        for a in range(len(columnList)):
+            if abs(columnList[a]["centerX"] - centerX) <= height * self.levelRowColumn:
+                columnList[a]["itemList"].append(itemObject)
+
+                return
+
+        columnList.append({"centerX": centerX, "itemList": [itemObject]})
+
+    def _boxSortedList(self, circleList):
+        boxList = []
+
+        for a in range(len(circleList)):
+            if circleList[a].get("isBox"):
+                boxList.append(circleList[a])
+
+        boxList.sort(key=lambda boxObject: (boxObject["bbox"][1], boxObject["bbox"][0]))
+
+        return boxList
+
+    def _optionGapFind(self, bboxItemList, bboxList, size):
+        gap = bboxItemList[0] - bboxList[2]
+
+        isRight = True
+
+        if gap < -size * self.levelOptionBoxGap:
+            gap = bboxList[0] - bboxItemList[2]
+
+            if gap < -size * self.levelOptionBoxGap:
+                return None
+
+            gap += size * self.levelOptionBoxLabel
+
+            isRight = False
+
+        if gap > size * self.levelOptionBoxLabel * 2:
+            return None
+
+        return {"gap": gap, "isRight": isRight}
+
+    def _cellGroupBuild(self, memberList, height, lineObject):
+        resultObject = {}
+
+        for a in range(len(memberList)):
+            cell = self._cellProbe(memberList[a]["bbox"], height, lineObject)
+
+            if cell != None:
+                if cell not in resultObject:
+                    resultObject[cell] = []
+
+                resultObject[cell].append(memberList[a])
+
+        return resultObject
+
+    def _ringTextRead(self, bboxRingList, imageInk, recognition, image):
+        centerX = (bboxRingList[0] + bboxRingList[2]) / 2
+        centerY = (bboxRingList[1] + bboxRingList[3]) / 2
+
+        radius = (bboxRingList[2] - bboxRingList[0]) / 2 * self.levelRingInner
+
+        x1 = int(centerX - radius)
+        y1 = int(centerY - radius)
+        x2 = int(centerX + radius)
+        y2 = int(centerY + radius)
+
+        if imageInk[y1:y2, x1:x2].sum() == 0:
+            return None
+
+        recognitionList = recognition.execute([[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]], image)
+
+        text = recognitionList[0]["text"].strip()
+
+        if len(text) == 0:
+            return None
+
+        return {"text": text, "bbox": [x1, y1, x2, y2]}
+
+    def _bandInsideCheck(self, bboxList, horizontalList, centerY):
+        bandList = self._bandFind(bboxList, horizontalList)
+
+        return bandList != None and centerY >= bandList[0] and centerY <= bandList[1]
+
+    def _memberTextJoin(self, memberList):
+        text = ""
+
+        bboxList = list(memberList[0]["bbox"])
+
+        for a in range(len(memberList)):
+            text = self._textAppend(text, memberList[a]["text"])
+
+            bboxList = boxExpand(bboxList, memberList[a]["bbox"])
+
+        return {"text": text, "bbox": bboxList}
+
+    def _memberMergeBuild(self, memberObject, text, bboxList):
+        resultObject = dict(memberObject)
+
+        resultObject["text"] = text
+        resultObject["bbox"] = bboxList
+
+        return resultObject
+
+    def _matrixCellIndex(self, rowEdgeList, bboxList, columnEdgeList):
+        return [self._matrixIndex(rowEdgeList, (bboxList[1] + bboxList[3]) / 2), self._matrixIndex(columnEdgeList, (bboxList[0] + bboxList[2]) / 2)]
 
     def _lineNearCheck(self, lineList, start, end, bboxList, height):
         for a in range(len(lineList)):
@@ -923,7 +848,7 @@ class Module:
 
                 gap = runList[a]["bbox"][0] - runList[a - 1]["bbox"][2]
 
-                isSpace = gap > (bboxList[3] - bboxList[1]) * PdfChar.levelSpace and (self._wideCheck(textPrevious[-1:] or " ") and self._wideCheck(text[0:1] or " ")) == False
+                isSpace = gap > (bboxList[3] - bboxList[1]) * levelSpaceChar and (wideCheck(textPrevious[-1:] or " ") and wideCheck(text[0:1] or " ")) == False
 
                 if isSpace:
                     textList.append(" ")
@@ -944,13 +869,6 @@ class Module:
     def _bareNumberCheck(self, text):
         return len(text) > 0 and unicodedata.category(text[0]) != "Ps" and self._numberCheck(text)
 
-    def _letterContain(self, text):
-        for a in range(len(text)):
-            if unicodedata.category(text[a])[0] == "L":
-                return True
-
-        return False
-
     def _numberJoinCheck(self, runList, index):
         if index == 0 or index == len(runList) - 1:
             return False
@@ -958,12 +876,12 @@ class Module:
         isLetter = False
 
         for a in [index - 1, index + 1]:
-            text = self._textClean(runList[a]["text"])
+            text = categoryRemove(runList[a]["text"], categoryBlankList)
 
             if self._bareNumberCheck(text):
                 return False
 
-            if self._letterContain(text):
+            if categoryContainCheck(text, categoryLetterList):
                 isLetter = True
 
         if isLetter == False:
@@ -994,10 +912,7 @@ class Module:
             if abs(bboxOtherList[0] - bboxList[0]) > height * self.levelGutterAlign:
                 continue
 
-            if bboxOtherList[1] < bboxList[1] and self._ruleBetweenCheck(horizontalList, bboxOtherList, bboxList):
-                continue
-
-            if bboxOtherList[1] > bboxList[1] and self._ruleBetweenCheck(horizontalList, bboxList, bboxOtherList):
+            if self._ruleCrossCheck(bboxList, bboxOtherList, horizontalList):
                 continue
 
             for b in range(len(itemList)):
@@ -1014,7 +929,7 @@ class Module:
         if alignObject == None:
             return False
 
-        if index == len(runList) - 1 and len(self._textClean(runList[index]["text"])) == 1:
+        if index == len(runList) - 1 and len(categoryRemove(runList[index]["text"], categoryBlankList)) == 1:
             isLastAlign = True
 
             for a in range(len(itemList)):
@@ -1038,13 +953,13 @@ class Module:
         return countAlign < 2
 
     def _numberSeparatorCheck(self, itemObject, itemOtherObject):
-        text = self._textClean(itemObject["text"])
-        textOther = self._textClean(itemOtherObject["text"])
+        text = categoryRemove(itemObject["text"], categoryBlankList)
+        textOther = categoryRemove(itemOtherObject["text"], categoryBlankList)
 
         if len(text) < 2 or len(textOther) == 0 or unicodedata.category(text[-1]) != "Po" or unicodedata.category(text[0]) != "Nd" or unicodedata.category(textOther[0]) != "Nd":
             return False
 
-        return self._letterContain(text) == False and self._letterContain(textOther) == False
+        return categoryContainCheck(text, categoryLetterList) == False and categoryContainCheck(textOther, categoryLetterList) == False
 
     def _cellRunSplit(self, runList, itemList, lineObject, height):
         if len(runList) < 2:
@@ -1086,7 +1001,7 @@ class Module:
                 isJoin = True
 
             for b in [a - 1, a]:
-                if isJoin and isSeparator == False and self._bareNumberCheck(self._textClean(runList[b]["text"])) and self._numberJoinCheck(runList, b) == False:
+                if isJoin and isSeparator == False and self._bareNumberCheck(categoryRemove(runList[b]["text"], categoryBlankList)) and self._numberJoinCheck(runList, b) == False:
                     isJoin = False
 
             if isJoin and isSeparator == False and self._gutterCheck(itemList, runList, a, lineObject, height):
@@ -1140,7 +1055,7 @@ class Module:
         for a in range(len(itemList)):
             itemObject = itemList[a]
 
-            if itemObject.get("isOption") or len(self._textClean(itemObject["text"])) == 0:
+            if itemObject.get("isOption") or len(categoryRemove(itemObject["text"], categoryBlankList)) == 0:
                 continue
 
             candidateList.append(itemObject)
@@ -1377,7 +1292,7 @@ class Module:
             ringObject = None
 
             for b in range(len(ringList)):
-                if self._iou(bboxList, ringList[b]["bbox"]) >= self.levelRingArtifact:
+                if boxIou(bboxList, ringList[b]["bbox"]) >= self.levelRingArtifact:
                     ringObject = ringList[b]
 
                     break
@@ -1387,34 +1302,12 @@ class Module:
 
                 continue
 
-            bboxRingList = ringObject["bbox"]
+            readObject = self._ringTextRead(ringObject["bbox"], imageInk, recognition, image)
 
-            centerX = (bboxRingList[0] + bboxRingList[2]) / 2
-            centerY = (bboxRingList[1] + bboxRingList[3]) / 2
-
-            radius = (bboxRingList[2] - bboxRingList[0]) / 2 * self.levelRingInner
-
-            x1 = int(centerX - radius)
-            y1 = int(centerY - radius)
-            x2 = int(centerX + radius)
-            y2 = int(centerY + radius)
-
-            if imageInk[y1:y2, x1:x2].sum() == 0:
+            if readObject == None:
                 continue
 
-            recognitionList = recognition.execute([[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]], image)
-
-            text = recognitionList[0]["text"].strip()
-
-            if len(text) == 0:
-                continue
-
-            itemObject = dict(itemList[a])
-
-            itemObject["text"] = text
-            itemObject["bbox"] = [x1, y1, x2, y2]
-
-            resultList.append(itemObject)
+            resultList.append(self._memberMergeBuild(itemList[a], readObject["text"], readObject["bbox"]))
 
         for a in range(len(ringList)):
             bboxRingList = ringList[a]["bbox"]
@@ -1435,22 +1328,10 @@ class Module:
             if isCovered:
                 continue
 
-            radius = (bboxRingList[2] - bboxRingList[0]) / 2 * self.levelRingInner
+            readObject = self._ringTextRead(bboxRingList, imageInk, recognition, image)
 
-            x1 = int(centerX - radius)
-            y1 = int(centerY - radius)
-            x2 = int(centerX + radius)
-            y2 = int(centerY + radius)
-
-            if imageInk[y1:y2, x1:x2].sum() == 0:
-                continue
-
-            recognitionList = recognition.execute([[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]], image)
-
-            text = recognitionList[0]["text"].strip()
-
-            if len(text) > 0:
-                resultList.append({"text": text, "bbox": [x1, y1, x2, y2], "isVertical": False, "charList": [], "page": 1})
+            if readObject != None:
+                resultList.append({"text": readObject["text"], "bbox": readObject["bbox"], "isVertical": False, "charList": [], "page": 1})
 
         return resultList
 
@@ -1574,7 +1455,7 @@ class Module:
             for b in range(len(columnList[a])):
                 text += columnList[a][b]["text"].strip()
 
-                bboxList = self._bboxExpand(bboxList, columnList[a][b]["bbox"])
+                bboxList = boxExpand(bboxList, columnList[a][b]["bbox"])
 
             verticalList.append({"text": text, "bbox": bboxList})
 
@@ -1638,14 +1519,6 @@ class Module:
             return [charList]
 
         return self._pitchSplit(charList[0:indexBest + 1]) + self._pitchSplit(charList[indexBest + 1:])
-
-    def _bboxExpand(self, bboxList, bboxOtherList):
-        return [
-            min(bboxList[0], bboxOtherList[0]),
-            min(bboxList[1], bboxOtherList[1]),
-            max(bboxList[2], bboxOtherList[2]),
-            max(bboxList[3], bboxOtherList[3])
-        ]
 
     def _bandBuild(self, itemList):
         if len(itemList) == 0:
@@ -1729,31 +1602,19 @@ class Module:
             bboxList = list(groupObject[root][0]["bbox"])
 
             for a in range(len(groupObject[root])):
-                bboxList = self._bboxExpand(bboxList, groupObject[root][a]["bbox"])
+                bboxList = boxExpand(bboxList, groupObject[root][a]["bbox"])
 
             bandList.append({"bbox": bboxList, "itemList": groupObject[root]})
 
         return sorted(bandList, key=lambda bandObject: bandObject["bbox"][1])
 
-    def _textClean(self, text):
-        result = ""
-
-        for a in range(len(text)):
-            if unicodedata.category(text[a]) not in ["Zs", "Cc"]:
-                result += text[a]
-
-        return result
-
     def _textAppend(self, text, textNext):
         textNext = self._spaceNormalize(textNext)
 
-        if len(text) == 0 or len(textNext) == 0 or unicodedata.category(text[-1]) == "Zs" or (self._wideCheck(text[-1]) and self._wideCheck(textNext[0])):
+        if len(text) == 0 or len(textNext) == 0 or unicodedata.category(text[-1]) == "Zs" or (wideCheck(text[-1]) and wideCheck(textNext[0])):
             return f"{text}{textNext}"
 
         return f"{text} {textNext}"
-
-    def _wideCheck(self, character):
-        return unicodedata.east_asian_width(character) in ["W", "F"]
 
     def _spaceNormalize(self, text):
         result = ""
@@ -1763,7 +1624,7 @@ class Module:
                 previous = result[len(result) - 1]
                 following = text[a + 1]
 
-                if self._wideCheck(previous) and self._wideCheck(following):
+                if wideCheck(previous) and wideCheck(following):
                     continue
 
                 if unicodedata.category(following) == "Zs":
@@ -1825,7 +1686,7 @@ class Module:
         countWeight = 0
 
         while countLetter < len(text) and unicodedata.category(text[countLetter])[0] == "L":
-            countWeight += self.countUnitMaximum + 1 if self._wideCheck(text[countLetter]) else 1
+            countWeight += self.countUnitMaximum + 1 if wideCheck(text[countLetter]) else 1
 
             countLetter += 1
 
@@ -1845,7 +1706,7 @@ class Module:
         if isDigit and unicodedata.category(text[-1]) == "Sm":
             return True
 
-        if isDigit and self._letterContain(text) == False and self._formulaMarkContain(text):
+        if isDigit and categoryContainCheck(text, categoryLetterList) == False and categoryContainCheck(text, categoryOperatorList):
             return True
 
         countLetterAll = 0
@@ -1918,20 +1779,6 @@ class Module:
 
         return overlap > min(bboxList[3] - bboxList[1], bboxOtherList[3] - bboxOtherList[1]) * self.levelRowOverlap
 
-    def _operatorContain(self, text):
-        for a in range(len(text)):
-            if unicodedata.category(text[a]) in ["Sm", "Pd"]:
-                return True
-
-        return False
-
-    def _formulaMarkContain(self, text):
-        for a in range(len(text)):
-            if unicodedata.category(text[a]) in ["Sm", "Pd"]:
-                return True
-
-        return False
-
     def _wallLongCheck(self, bboxList, lineList, start, end, height):
         centerY = (bboxList[1] + bboxList[3]) / 2
 
@@ -1977,7 +1824,7 @@ class Module:
             for b in range(len(charList)):
                 text += charList[b]["text"]
 
-            if itemObject["isVertical"] or self._textClean(text) != self._textClean(itemObject["text"]) or self._letterContain(itemObject["text"]) == False:
+            if itemObject["isVertical"] or categoryRemove(text, categoryBlankList) != categoryRemove(itemObject["text"], categoryBlankList) or categoryContainCheck(itemObject["text"], categoryLetterList) == False:
                 resultList.append(itemObject)
 
                 continue
@@ -1998,7 +1845,7 @@ class Module:
                 if b < len(charList):
                     wallObject = self._wallCutFind(charList, b, wallList, centerY, height)
 
-                    if wallObject == None or self._letterContain(text[indexStart:b]) == False or self._letterContain(text[b:]) == False:
+                    if wallObject == None or categoryContainCheck(text[indexStart:b], categoryLetterList) == False or categoryContainCheck(text[b:], categoryLetterList) == False:
                         continue
 
                 partObject = dict(itemObject)
@@ -2047,7 +1894,7 @@ class Module:
         for a in range(len(itemSortedList)):
             itemObject = itemSortedList[a]
 
-            if itemObject in removeList or self._letterContain(itemObject["text"]) == False:
+            if itemObject in removeList or categoryContainCheck(itemObject["text"], categoryLetterList) == False:
                 continue
 
             count = self._bracketCount(itemObject["text"])
@@ -2080,7 +1927,7 @@ class Module:
 
             for b in range(len(joinList)):
                 itemObject["text"] = f"{itemObject['text']} {joinList[b]['text']}"
-                itemObject["bbox"] = self._bboxExpand(itemObject["bbox"], joinList[b]["bbox"])
+                itemObject["bbox"] = boxExpand(itemObject["bbox"], joinList[b]["bbox"])
 
                 removeList.append(joinList[b])
 
@@ -2108,7 +1955,7 @@ class Module:
             return False
 
         for a in range(len(itemList)):
-            text = self._textClean(itemList[a]["text"])
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
 
             bboxOtherList = itemList[a]["bbox"]
 
@@ -2131,18 +1978,18 @@ class Module:
             for b in range(len(text)):
                 category = unicodedata.category(text[b])
 
-                if category == "Ps" and countLetter > self.countUnitMaximum and self._letterContain(text[b:]) == False and self._operatorContain(text[b:]) and self._formulaCheck(self._textClean(text[b:])):
+                if category == "Ps" and countLetter > self.countUnitMaximum and categoryContainCheck(text[b:], categoryLetterList) == False and categoryContainCheck(text[b:], categoryOperatorList) and self._formulaCheck(categoryRemove(text[b:], categoryBlankList)):
                     indexSplit = b
 
                     break
 
-                if category in ["Nd", "No"] and countLetter > 0 and self._letterContain(text[b:]) == False and self._formulaMarkContain(text[b:]) and self._numberRightCheck(itemList[a]["bbox"], itemList, horizontalList):
+                if category in ["Nd", "No"] and countLetter > 0 and categoryContainCheck(text[b:], categoryLetterList) == False and categoryContainCheck(text[b:], categoryOperatorList) and self._numberRightCheck(itemList[a]["bbox"], itemList, horizontalList):
                     indexSplit = b
 
                     break
 
                 if category[0] == "L":
-                    countLetter += self.countUnitMaximum + 1 if self._wideCheck(text[b]) else 1
+                    countLetter += self.countUnitMaximum + 1 if wideCheck(text[b]) else 1
                 elif category[0] in ["P", "S"]:
                     break
 
@@ -2174,7 +2021,7 @@ class Module:
 
         return resultList
 
-    def _numberCellCheck(self, text):
+    def _numberCellSeparatorCheck(self, text):
         return "|" in text and self._numberCheck(text.replace("|", ""))
 
     def _numberSuffixCheck(self, text):
@@ -2201,7 +2048,7 @@ class Module:
 
     def _typeAssign(self, itemList, height):
         for a in range(len(itemList)):
-            text = self._textClean(itemList[a]["text"])
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
 
             if itemList[a].get("isFormula"):
                 itemList[a]["type"] = "formula"
@@ -2209,7 +2056,7 @@ class Module:
                 itemList[a]["type"] = "value"
             elif self._zeroCheck(text):
                 itemList[a]["type"] = "suffix"
-            elif itemList[a]["bbox"][3] - itemList[a]["bbox"][1] <= height * self.levelDisplaySize and (self._numberCheck(text) or self._numberUnitCheck(text) or self._numberCellCheck(text)):
+            elif itemList[a]["bbox"][3] - itemList[a]["bbox"][1] <= height * self.levelDisplaySize and (self._numberCheck(text) or self._numberUnitCheck(text) or self._numberCellSeparatorCheck(text)):
                 itemList[a]["type"] = "value"
             elif len(text) > 0 and self._formulaCheck(text):
                 itemList[a]["type"] = "formula"
@@ -2268,7 +2115,7 @@ class Module:
 
                 bboxList = itemList[a]["bbox"]
 
-                textClean = self._textClean(text)
+                textClean = categoryRemove(text, categoryBlankList)
 
                 isOperator = len(textClean) > 0 and unicodedata.category(textClean[-1]) == "Sm"
 
@@ -2280,7 +2127,7 @@ class Module:
                     if itemList[b]["type"] not in ["value", "key"] or gap < -height * self.levelMargin or gap > height * self.levelUnitGap or self._rangeCheck(bboxList, bboxOtherList) == False:
                         continue
 
-                    if itemList[b]["type"] == "key" and self._letterContain(itemList[b]["text"]):
+                    if itemList[b]["type"] == "key" and categoryContainCheck(itemList[b]["text"], categoryLetterList):
                         continue
 
                     if isOperator == False and self._wallCheck(lineObject["verticalList"], bboxList[2] - height * self.levelMargin, bboxOtherList[0] + height * self.levelMargin, bboxOtherList):
@@ -2315,7 +2162,7 @@ class Module:
         numberList = []
 
         for a in range(len(itemList)):
-            text = self._textClean(itemList[a]["text"])
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
 
             countDigit = 0
 
@@ -2331,18 +2178,7 @@ class Module:
         for a in range(len(numberList)):
             centerX = (numberList[a]["bbox"][0] + numberList[a]["bbox"][2]) / 2
 
-            isAdded = False
-
-            for b in range(len(columnList)):
-                if abs(columnList[b]["centerX"] - centerX) <= height * self.levelRowColumn:
-                    columnList[b]["itemList"].append(numberList[a])
-
-                    isAdded = True
-
-                    break
-
-            if isAdded == False:
-                columnList.append({"centerX": centerX, "itemList": [numberList[a]]})
+            self._columnCenterAppend(columnList, centerX, height, numberList[a])
 
         for a in range(len(columnList)):
             columnItemList = sorted(columnList[a]["itemList"], key=lambda itemObject: itemObject["bbox"][1])
@@ -2356,16 +2192,16 @@ class Module:
                 for c in range(len(columnList[b]["itemList"])):
                     otherObject = columnList[b]["itemList"][c]
 
-                    valueOtherList.append({"value": self._digitValue(self._textClean(otherObject["text"])), "y": (otherObject["bbox"][1] + otherObject["bbox"][3]) / 2})
+                    valueOtherList.append({"value": self._digitValue(categoryRemove(otherObject["text"], categoryBlankList)), "y": (otherObject["bbox"][1] + otherObject["bbox"][3]) / 2})
 
             runList = [columnItemList[0]]
 
             for b in range(1, len(columnItemList) + 1):
-                valueLast = self._digitValue(self._textClean(runList[len(runList) - 1]["text"]))
+                valueLast = self._digitValue(categoryRemove(runList[len(runList) - 1]["text"], categoryBlankList))
 
-                isContinue = b < len(columnItemList) and self._rowStepCheck(valueLast, self._digitValue(self._textClean(columnItemList[b]["text"])), valueOtherList, columnItemList[b]["bbox"][3], self._slotCount(itemList, columnList, runList[len(runList) - 1]["bbox"][3], columnItemList[b]["bbox"][1]))
+                isContinue = b < len(columnItemList) and self._rowStepCheck(valueLast, self._digitValue(categoryRemove(columnItemList[b]["text"], categoryBlankList)), valueOtherList, columnItemList[b]["bbox"][3], self._slotCount(itemList, columnList, runList[len(runList) - 1]["bbox"][3], columnItemList[b]["bbox"][1]))
 
-                if isContinue == False and b + 1 < len(columnItemList) and self._digitValue(self._textClean(columnItemList[b + 1]["text"])) == valueLast + 2:
+                if isContinue == False and b + 1 < len(columnItemList) and self._digitValue(categoryRemove(columnItemList[b + 1]["text"], categoryBlankList)) == valueLast + 2:
                     columnItemList[b]["text"] = str(valueLast + 1)
 
                     isContinue = True
@@ -2375,10 +2211,10 @@ class Module:
 
                     continue
 
-                if len(runList) >= self.countRowMinimum and len(columnItemList) >= self.countRowColumn:
+                if len(runList) >= self.countRowMinimum and len(columnItemList) >= self.countColumnItem:
                     for c in range(len(runList)):
                         runList[c]["type"] = "row"
-                        runList[c]["text"] = str(self._digitValue(self._textClean(runList[c]["text"])))
+                        runList[c]["text"] = str(self._digitValue(categoryRemove(runList[c]["text"], categoryBlankList)))
 
                 if b < len(columnItemList):
                     runList = [columnItemList[b]]
@@ -2446,13 +2282,13 @@ class Module:
     def _labelNext(self, chainList, lineSortedList, usedList):
         lastObject = chainList[len(chainList) - 1]
 
-        if self._bareNumberCheck(self._textClean(lastObject["text"])) == False:
+        if self._bareNumberCheck(categoryRemove(lastObject["text"], categoryBlankList)) == False:
             return None
 
         labelList = []
 
         for a in range(len(chainList)):
-            text = self._textClean(chainList[a]["text"])
+            text = categoryRemove(chainList[a]["text"], categoryBlankList)
 
             if len(text) > 0 and len(text) <= self.countUnitMaximum and self._bareNumberCheck(text) == False:
                 labelList.append(chainList[a])
@@ -2472,7 +2308,7 @@ class Module:
 
         labelLast = labelList[len(labelList) - 1]
 
-        countLabel = len(self._textClean(labelLast["text"]))
+        countLabel = len(categoryRemove(labelLast["text"], categoryBlankList))
 
         positionNext = labelLast["bbox"][0] + pitch
 
@@ -2555,7 +2391,7 @@ class Module:
 
                 gap = nextObject["bbox"][0] - lastObject["bbox"][2]
 
-                text = self._textClean(nextObject["text"])
+                text = categoryRemove(nextObject["text"], categoryBlankList)
 
                 isNumber = nextObject["type"] in ["value", "suffix"]
                 heightMaximum = max(nextObject["bbox"][3] - nextObject["bbox"][1], lastObject["bbox"][3] - lastObject["bbox"][1])
@@ -2573,7 +2409,7 @@ class Module:
 
                 bboxSpanList = [0, max(nextObject["bbox"][1], lastObject["bbox"][1]), 0, min(nextObject["bbox"][3], lastObject["bbox"][3])]
 
-                isColumn = len(self._textClean(lastObject["text"])) >= 2 and len(text) >= 2 and self._wallCheck(verticalList, lastObject["bbox"][2] - height * self.levelMargin, nextObject["bbox"][0] + height * self.levelMargin, bboxSpanList)
+                isColumn = len(categoryRemove(lastObject["text"], categoryBlankList)) >= 2 and len(text) >= 2 and self._wallCheck(verticalList, lastObject["bbox"][2] - height * self.levelMargin, nextObject["bbox"][0] + height * self.levelMargin, bboxSpanList)
 
                 if isColumn and (self._wallCheck(verticalList, lastObject["bbox"][0] + height * self.levelMargin, lastObject["bbox"][2] - height * self.levelMargin, lastObject["bbox"]) or self._wallCheck(verticalList, nextObject["bbox"][0] + height * self.levelMargin, nextObject["bbox"][2] - height * self.levelMargin, nextObject["bbox"])):
                     isColumn = False
@@ -2589,7 +2425,7 @@ class Module:
 
                     isExtended = True
 
-            while len(chainList) > 1 and chainList[len(chainList) - 1]["type"] not in ["value", "suffix"] and self._symbolCheck(self._textClean(chainList[len(chainList) - 1]["text"])):
+            while len(chainList) > 1 and chainList[len(chainList) - 1]["type"] not in ["value", "suffix"] and self._symbolCheck(categoryRemove(chainList[len(chainList) - 1]["text"], categoryBlankList)):
                 chainList.pop()
 
             labelObject = self._labelNext(chainList, lineSortedList, usedList)
@@ -2604,12 +2440,12 @@ class Module:
             for b in range(len(lineSortedList)):
                 candidateObject = lineSortedList[b]
 
-                if candidateObject in chainList or candidateObject in usedList or self._symbolCheck(self._textClean(candidateObject["text"])) == False:
+                if candidateObject in chainList or candidateObject in usedList or self._symbolCheck(categoryRemove(candidateObject["text"], categoryBlankList)) == False:
                     continue
 
                 gap = chainList[0]["bbox"][0] - candidateObject["bbox"][2]
 
-                textCandidate = self._textClean(candidateObject["text"])
+                textCandidate = categoryRemove(candidateObject["text"], categoryBlankList)
 
                 gapLimit = height * self.levelComposeGap if unicodedata.category(textCandidate[-1:] or " ") == "Ps" else height * self.levelUnitGap
 
@@ -2690,7 +2526,7 @@ class Module:
         for a in range(len(itemList)):
             numberObject = itemList[a]
 
-            text = self._textClean(numberObject["text"])
+            text = categoryRemove(numberObject["text"], categoryBlankList)
 
             if self._numberValue(text) < 0 or len(text) > 2:
                 continue
@@ -2705,7 +2541,7 @@ class Module:
             for b in range(len(itemList)):
                 bboxList = itemList[b]["bbox"]
 
-                textEnclosure = self._textClean(itemList[b]["text"])
+                textEnclosure = categoryRemove(itemList[b]["text"], categoryBlankList)
 
                 if b == a or len(textEnclosure) != 1 or unicodedata.category(textEnclosure) == "Nd" or itemList[b] in removeList:
                     continue
@@ -2736,7 +2572,7 @@ class Module:
                         hostObject = itemList[b]
 
             if hostObject == None:
-                if self._letterContain(enclosureObject["text"]) == False:
+                if categoryContainCheck(enclosureObject["text"], categoryLetterList) == False:
                     enclosureObject["isEnclosure"] = True
 
                 continue
@@ -2776,7 +2612,7 @@ class Module:
 
     def _enclosedMark(self, itemList, ringList):
         for a in range(len(itemList)):
-            text = self._textClean(itemList[a]["text"])
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
 
             if self._numberValue(text) < 0 or len(text) > 2:
                 continue
@@ -2822,7 +2658,7 @@ class Module:
 
         charList = list(self._charPosition(hostObject))
 
-        charList[indexHost] = {"text": self._enclosedText(self._numberValue(self._textClean(numberObject["text"]))), "start": charList[indexHost]["start"], "end": charList[indexHost]["end"]}
+        charList[indexHost] = {"text": self._enclosedText(self._numberValue(categoryRemove(numberObject["text"], categoryBlankList))), "start": charList[indexHost]["start"], "end": charList[indexHost]["end"]}
 
         textList = []
 
@@ -2840,7 +2676,7 @@ class Module:
         for a in range(len(itemList)):
             insertObject = itemList[a]
 
-            text = self._textClean(insertObject["text"])
+            text = categoryRemove(insertObject["text"], categoryBlankList)
 
             if len(text) == 0 or len(text) > self.countUnitMaximum:
                 continue
@@ -2921,9 +2757,9 @@ class Module:
         for a in range(len(itemList)):
             isArtifact = False
 
-            if self._ringTextCheck(self._textClean(itemList[a]["text"])):
+            if self._ringTextCheck(categoryRemove(itemList[a]["text"], categoryBlankList)):
                 for b in range(len(ringList)):
-                    if self._iou(itemList[a]["bbox"], ringList[b]["bbox"]) >= self.levelRingArtifact:
+                    if boxIou(itemList[a]["bbox"], ringList[b]["bbox"]) >= self.levelRingArtifact:
                         isArtifact = True
 
                         break
@@ -2932,17 +2768,6 @@ class Module:
                 resultList.append(itemList[a])
 
         return resultList
-
-    def _iou(self, bboxList, bboxOtherList):
-        width = min(bboxList[2], bboxOtherList[2]) - max(bboxList[0], bboxOtherList[0])
-        height = min(bboxList[3], bboxOtherList[3]) - max(bboxList[1], bboxOtherList[1])
-
-        if width <= 0 or height <= 0:
-            return 0
-
-        area = width * height
-
-        return area / ((bboxList[2] - bboxList[0]) * (bboxList[3] - bboxList[1]) + (bboxOtherList[2] - bboxOtherList[0]) * (bboxOtherList[3] - bboxOtherList[1]) - area)
 
     def _stackLetterCheck(self, text):
         if len(text) == 0 or len(text) > self.countStackLetter:
@@ -2954,25 +2779,13 @@ class Module:
 
         return True
 
-    def _stackMemberCollect(self, itemObject, lineList, horizontalList, itemList):
+    def _stackMemberCollect(self, itemObject, lineList, horizontalList, itemList, isSparse):
         bboxList = itemObject["bbox"]
 
-        centerX = (bboxList[0] + bboxList[2]) / 2
+        sideList = self._wallSideFind(bboxList, lineList)
 
-        left = None
-        right = None
-
-        for a in range(len(lineList)):
-            bboxLineList = lineList[a]
-
-            if self._overlap(bboxLineList[1], bboxLineList[3], bboxList[1], bboxList[3]) < (bboxList[3] - bboxList[1]) * self.levelLineCover:
-                continue
-
-            if bboxLineList[2] <= centerX and (left == None or bboxLineList[2] > left):
-                left = bboxLineList[2]
-
-            if bboxLineList[0] >= centerX and (right == None or bboxLineList[0] < right):
-                right = bboxLineList[0]
+        left = sideList[0]
+        right = sideList[1]
 
         bandList = self._bandFind(bboxList, horizontalList)
 
@@ -2990,10 +2803,18 @@ class Module:
             if centerOtherX <= left or centerOtherX >= right or centerOtherY <= bandList[0] or centerOtherY >= bandList[1]:
                 continue
 
-            if self._stackLetterCheck(self._textClean(itemList[a]["text"])) == False:
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
+
+            if isSparse and (len(text) != 1 or categoryContainCheck(itemList[a]["text"], categoryLetterList) == False):
+                return []
+
+            if isSparse == False and self._stackLetterCheck(text) == False:
                 return []
 
             resultList.append(itemList[a])
+
+        if isSparse:
+            return sorted(resultList, key=lambda memberObject: memberObject["bbox"][1])
 
         return self._stackDoubleSpan(resultList)
 
@@ -3003,7 +2824,7 @@ class Module:
         width = bboxList[2] - bboxList[0]
         height = bboxList[3] - bboxList[1]
 
-        return itemObject.get("isVertical") != True and len(self._textClean(itemObject["text"])) == 2 and width >= height and width <= height * self.levelStackWidth
+        return itemObject.get("isVertical") != True and len(categoryRemove(itemObject["text"], categoryBlankList)) == 2 and width >= height and width <= height * self.levelStackWidth
 
     def _stackDoubleSpan(self, memberList):
         top = None
@@ -3044,7 +2865,7 @@ class Module:
         bboxList = list(memberList[0]["bbox"])
 
         for a in range(len(memberList)):
-            bboxList = self._bboxExpand(bboxList, memberList[a]["bbox"])
+            bboxList = boxExpand(bboxList, memberList[a]["bbox"])
 
         leftList = []
         rightList = []
@@ -3052,7 +2873,7 @@ class Module:
         for a in range(len(memberList)):
             bboxMemberList = memberList[a]["bbox"]
 
-            text = self._textClean(memberList[a]["text"])
+            text = categoryRemove(memberList[a]["text"], categoryBlankList)
 
             if len(text) == 2 and memberList[a].get("isVertical"):
                 leftList.append({"y": bboxMemberList[1], "text": text})
@@ -3077,49 +2898,6 @@ class Module:
 
         return {"text": text, "bbox": bboxList}
 
-    def _stackSparseMember(self, itemObject, lineList, horizontalList, itemList):
-        bboxList = itemObject["bbox"]
-
-        centerX = (bboxList[0] + bboxList[2]) / 2
-
-        left = None
-        right = None
-
-        for a in range(len(lineList)):
-            bboxLineList = lineList[a]
-
-            if self._overlap(bboxLineList[1], bboxLineList[3], bboxList[1], bboxList[3]) < (bboxList[3] - bboxList[1]) * self.levelLineCover:
-                continue
-
-            if bboxLineList[2] <= centerX and (left == None or bboxLineList[2] > left):
-                left = bboxLineList[2]
-
-            if bboxLineList[0] >= centerX and (right == None or bboxLineList[0] < right):
-                right = bboxLineList[0]
-
-        bandList = self._bandFind(bboxList, horizontalList)
-
-        if left == None or right == None or bandList == None:
-            return []
-
-        resultList = []
-
-        for a in range(len(itemList)):
-            bboxOtherList = itemList[a]["bbox"]
-
-            centerOtherX = (bboxOtherList[0] + bboxOtherList[2]) / 2
-            centerOtherY = (bboxOtherList[1] + bboxOtherList[3]) / 2
-
-            if centerOtherX <= left or centerOtherX >= right or centerOtherY <= bandList[0] or centerOtherY >= bandList[1]:
-                continue
-
-            if len(self._textClean(itemList[a]["text"])) != 1 or self._letterContain(itemList[a]["text"]) == False:
-                return []
-
-            resultList.append(itemList[a])
-
-        return sorted(resultList, key=lambda memberObject: memberObject["bbox"][1])
-
     def _rowMarkerCheck(self, itemObject, itemList, height, lineObject):
         bboxList = itemObject["bbox"]
 
@@ -3128,7 +2906,7 @@ class Module:
 
             gap = bboxOtherList[0] - bboxList[2]
 
-            if itemList[a] is itemObject or gap < -height * self.levelMargin or gap > height * self.levelKeyGap or self._rangeCheck(bboxOtherList, bboxList) == False or len(self._textClean(itemList[a]["text"])) <= self.countStackLetter:
+            if itemList[a] is itemObject or gap < -height * self.levelMargin or gap > height * self.levelKeyGap or self._rangeCheck(bboxOtherList, bboxList) == False or len(categoryRemove(itemList[a]["text"], categoryBlankList)) <= self.countStackLetter:
                 continue
 
             if self._wallCount(lineObject["verticalList"], bboxList[2], bboxOtherList[0], bboxList) == 0:
@@ -3142,12 +2920,12 @@ class Module:
         usedList = []
 
         for a in range(len(itemList)):
-            text = self._textClean(itemList[a]["text"])
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
 
-            if itemList[a] in usedList or itemList[a].get("isVertical") or len(text) != 1 or self._letterContain(text) == False or self._rowMarkerCheck(itemList[a], itemList, height, lineObject):
+            if itemList[a] in usedList or itemList[a].get("isVertical") or len(text) != 1 or categoryContainCheck(text, categoryLetterList) == False or self._rowMarkerCheck(itemList[a], itemList, height, lineObject):
                 continue
 
-            memberList = self._stackSparseMember(itemList[a], lineObject["verticalList"], lineObject["horizontalList"], itemList)
+            memberList = self._stackMemberCollect(itemList[a], lineObject["verticalList"], lineObject["horizontalList"], itemList, True)
 
             if len(memberList) < self.countSparseMinimum:
                 continue
@@ -3177,10 +2955,10 @@ class Module:
         usedList = []
 
         for a in range(len(itemList)):
-            if itemList[a] in usedList or self._stackDoubleCheck(itemList[a]) == False or self._stackLetterCheck(self._textClean(itemList[a]["text"])) == False or self._rowMarkerCheck(itemList[a], itemList, self._heightMedian(itemList), lineObject):
+            if itemList[a] in usedList or self._stackDoubleCheck(itemList[a]) == False or self._stackLetterCheck(categoryRemove(itemList[a]["text"], categoryBlankList)) == False or self._rowMarkerCheck(itemList[a], itemList, self._heightMedian(itemList), lineObject):
                 continue
 
-            memberList = self._stackMemberCollect(itemList[a], lineObject["verticalList"], lineObject["horizontalList"], itemList)
+            memberList = self._stackMemberCollect(itemList[a], lineObject["verticalList"], lineObject["horizontalList"], itemList, False)
 
             if len(memberList) == 0 or self._stackRowCount(memberList) < self.countVerticalMinimum:
                 continue
@@ -3201,8 +2979,8 @@ class Module:
         resultList = []
 
         for a in range(len(itemList)):
-            if itemList[a].get("isVertical") and len(self._textClean(itemList[a]["text"])) >= 2:
-                verticalList.append({"text": self._textClean(itemList[a]["text"]), "bbox": itemList[a]["bbox"]})
+            if itemList[a].get("isVertical") and len(categoryRemove(itemList[a]["text"], categoryBlankList)) >= 2:
+                verticalList.append({"text": categoryRemove(itemList[a]["text"], categoryBlankList), "bbox": itemList[a]["bbox"]})
 
                 continue
 
@@ -3245,7 +3023,7 @@ class Module:
         candidateList = []
 
         for a in range(len(itemList)):
-            text = self._textClean(itemList[a]["text"])
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
 
             if len(text) == 0 or len(text) > self.countUnitMaximum:
                 continue
@@ -3352,7 +3130,7 @@ class Module:
             for b in range(len(orderList)):
                 itemObject = groupList[orderList[b]]
 
-                textList.append(self._textClean(itemObject["text"]))
+                textList.append(categoryRemove(itemObject["text"], categoryBlankList))
 
                 bboxArcList = [min(bboxArcList[0], itemObject["bbox"][0]), min(bboxArcList[1], itemObject["bbox"][1]), max(bboxArcList[2], itemObject["bbox"][2]), max(bboxArcList[3], itemObject["bbox"][3])]
 
@@ -3429,7 +3207,7 @@ class Module:
             for b in range(len(itemSortedList)):
                 bboxOtherList = itemSortedList[b]["bbox"]
 
-                text = self._textClean(itemSortedList[b]["text"])
+                text = categoryRemove(itemSortedList[b]["text"], categoryBlankList)
 
                 if b == a or len(text) == 0 or unicodedata.category(text[-1]) != "Nd":
                     continue
@@ -3541,7 +3319,7 @@ class Module:
                 if abs(sizeFirst - sizeSecond) > max(sizeFirst, sizeSecond) * self.levelVerticalPairSize or self._isolatedCheck(secondObject, itemList, height) == False:
                     continue
 
-                verticalList.append({"text": self._textClean(firstObject["text"]) + self._textClean(secondObject["text"]), "bbox": [min(bboxFirstList[0], bboxSecondList[0]), bboxFirstList[1], max(bboxFirstList[2], bboxSecondList[2]), bboxSecondList[3]], "page": firstObject.get("page", 1)})
+                verticalList.append({"text": categoryRemove(firstObject["text"], categoryBlankList) + categoryRemove(secondObject["text"], categoryBlankList), "bbox": [min(bboxFirstList[0], bboxSecondList[0]), bboxFirstList[1], max(bboxFirstList[2], bboxSecondList[2]), bboxSecondList[3]], "page": firstObject.get("page", 1)})
 
                 usedList.append(firstObject)
                 usedList.append(secondObject)
@@ -3637,7 +3415,7 @@ class Module:
             bboxLineList = list(lineList[0]["bbox"])
 
             for b in range(len(lineList)):
-                textList.append(self._textClean(lineList[b]["text"]))
+                textList.append(categoryRemove(lineList[b]["text"], categoryBlankList))
 
                 bboxList = lineList[b]["bbox"]
 
@@ -3654,7 +3432,7 @@ class Module:
         return resultList
 
     def _letterCheck(self, itemObject):
-        text = self._textClean(itemObject["text"])
+        text = categoryRemove(itemObject["text"], categoryBlankList)
 
         if len(text) != 1 or itemObject.get("isOption") or itemObject.get("isUnit"):
             return False
@@ -3679,7 +3457,7 @@ class Module:
                 if abs((bboxList[0] + bboxList[2]) / 2 - (bboxLastList[0] + bboxLastList[2]) / 2) > height * self.levelMargin * 2 or abs((bboxList[2] - bboxList[0]) - (bboxLastList[2] - bboxLastList[0])) > height * self.levelMargin * 2 or bboxList[1] < bboxLastList[3] or bboxList[1] - bboxLastList[3] > height * self.levelTitleStack or self._ruleBetweenCheck(lineObject["horizontalList"], bboxLastList, bboxList) or self._wallCheck(lineObject["verticalList"], bboxList[2], math.inf, bboxList) == False:
                     continue
 
-                resultList[b] = {"text": resultList[b]["text"] + verticalSortedList[a]["text"], "bbox": self._bboxExpand(bboxLastList, bboxList)}
+                resultList[b] = {"text": resultList[b]["text"] + verticalSortedList[a]["text"], "bbox": boxExpand(bboxLastList, bboxList)}
 
                 isJoined = True
 
@@ -3869,7 +3647,7 @@ class Module:
 
     def _scaleLabelCheck(self, labelList):
         for a in range(len(labelList)):
-            labelText = self._textClean(labelList[a]["text"])
+            labelText = categoryRemove(labelList[a]["text"], categoryBlankList)
 
             if len(labelText) == 0:
                 return False
@@ -3941,7 +3719,7 @@ class Module:
 
                     overlap = self._overlap(bboxOtherList[0], bboxOtherList[2], bboxValueList[0], bboxValueList[2])
 
-                    if bboxOtherList[1] >= bboxValueList[3] - height * self.levelMargin and bboxOtherList[1] - bboxValueList[3] <= height * self.levelUnitBelow and overlap >= min(bboxOtherList[2] - bboxOtherList[0], bboxValueList[2] - bboxValueList[0]) * self.levelColumnOverlap:
+                    if bboxOtherList[1] >= bboxValueList[3] - height * self.levelMargin and bboxOtherList[1] - bboxValueList[3] <= height * self.levelUnitBelow and overlap >= min(bboxOtherList[2] - bboxOtherList[0], bboxValueList[2] - bboxValueList[0]) * self.levelColumnItemOverlap:
                         isHeader = True
 
                         break
@@ -4109,7 +3887,7 @@ class Module:
 
                 if gap >= 0 and gap <= height * self.levelFieldGap and self._rangeCheck(outsideLineList[a]["bbox"], outsideLineList[b]["bbox"]):
                     outsideLineList[a]["text"] = f"{outsideLineList[a]['text']} {outsideLineList[b]['text']}"
-                    outsideLineList[a]["bbox"] = self._bboxExpand(outsideLineList[a]["bbox"], outsideLineList[b]["bbox"])
+                    outsideLineList[a]["bbox"] = boxExpand(outsideLineList[a]["bbox"], outsideLineList[b]["bbox"])
 
                     del outsideLineList[b]
 
@@ -4152,7 +3930,7 @@ class Module:
 
                 text += textPart
 
-                bboxList = self._bboxExpand(bboxList, partList[a]["bbox"])
+                bboxList = boxExpand(bboxList, partList[a]["bbox"])
 
             outsideLineList.append({"text": text, "bbox": bboxList, "page": partList[0]["page"]})
 
@@ -4161,22 +3939,10 @@ class Module:
         return resultList
 
     def _cellFind(self, bboxList, lineObject):
-        centerX = (bboxList[0] + bboxList[2]) / 2
+        sideList = self._wallSideFind(bboxList, lineObject["verticalList"])
 
-        left = None
-        right = None
-
-        for a in range(len(lineObject["verticalList"])):
-            bboxLineList = lineObject["verticalList"][a]
-
-            if self._overlap(bboxLineList[1], bboxLineList[3], bboxList[1], bboxList[3]) < (bboxList[3] - bboxList[1]) * self.levelLineCover:
-                continue
-
-            if bboxLineList[2] <= centerX and (left == None or bboxLineList[2] > left):
-                left = bboxLineList[2]
-
-            if bboxLineList[0] >= centerX and (right == None or bboxLineList[0] < right):
-                right = bboxLineList[0]
+        left = sideList[0]
+        right = sideList[1]
 
         centerY = (bboxList[1] + bboxList[3]) / 2
 
@@ -4249,14 +4015,9 @@ class Module:
             for b in range(len(rowList[a])):
                 text = self._textAppend(text, rowList[a][b]["text"])
 
-                bboxList = self._bboxExpand(bboxList, rowList[a][b]["bbox"])
+                bboxList = boxExpand(bboxList, rowList[a][b]["bbox"])
 
-        resultObject = dict(memberSortedList[0])
-
-        resultObject["text"] = text
-        resultObject["bbox"] = bboxList
-
-        return [resultObject]
+        return [self._memberMergeBuild(memberSortedList[0], text, bboxList)]
 
     def _cellStackMerge(self, restList, lineObject, height, itemList):
         cellObject = {}
@@ -4266,7 +4027,7 @@ class Module:
         for a in range(len(restList)):
             cell = self._cellFind(restList[a]["bbox"], lineObject)
 
-            if cell == None or cell[1] - cell[0] > height * self.levelCellLabel or restList[a].get("isOption") or restList[a].get("isMark") or restList[a].get("circleIndex", -1) >= 0 or self._letterContain(restList[a]["text"]) == False:
+            if cell == None or cell[1] - cell[0] > height * self.levelCellLabel or restList[a].get("isOption") or restList[a].get("isMark") or restList[a].get("circleIndex", -1) >= 0 or categoryContainCheck(restList[a]["text"], categoryLetterList) == False:
                 resultList.append(restList[a])
 
                 continue
@@ -4306,7 +4067,7 @@ class Module:
 
     def _cellLabelCheck(self, keyList, itemList, cell, height):
         for a in range(len(keyList)):
-            if self._letterContain(keyList[a]["text"]) == False or self._cellLeftCheck(itemList, cell, height, keyList[a]["bbox"]):
+            if categoryContainCheck(keyList[a]["text"], categoryLetterList) == False or self._cellLeftCheck(itemList, cell, height, keyList[a]["bbox"]):
                 return False
 
         text = ""
@@ -4314,13 +4075,13 @@ class Module:
         for a in range(len(keyList)):
             text = self._textAppend(text, keyList[a]["text"])
 
-        return self._shortTextUnitCheck(self._textClean(text)) == False
+        return self._shortTextUnitCheck(categoryRemove(text, categoryBlankList)) == False
 
     def _cellEnclosedCheck(self, memberList):
         if len(memberList) != 1:
             return False
 
-        text = self._textClean(memberList[0]["text"])
+        text = categoryRemove(memberList[0]["text"], categoryBlankList)
 
         return len(text) > 0 and unicodedata.category(text[0]) == "Ps" and unicodedata.category(text[-1]) == "Pe"
 
@@ -4410,16 +4171,16 @@ class Module:
             for b in range(len(lineList[a])):
                 textPart = lineList[a][b]["text"].strip()
 
-                if textPart.startswith(self.textMark) or textPart.startswith(self.textOption):
+                if textPart.startswith(textOptionMark) or textPart.startswith(textOptionEmpty):
                     partList.append(textPart)
 
                     continue
 
-                partList.append(f"{self.textMark} {textPart}" if lineList[a][b].get("isMark") else f"{self.textOption} {textPart}" if lineList[a][b].get("isOption") else textPart)
+                partList.append(f"{textOptionMark} {textPart}" if lineList[a][b].get("isMark") else f"{textOptionEmpty} {textPart}" if lineList[a][b].get("isOption") else textPart)
 
             textList.append(" ".join(partList))
 
-        return " / ".join(textList)
+        return separatorOption.join(textList)
 
     def _cellCenterCheck(self, memberList, cell, height):
         left = memberList[0]["bbox"][0]
@@ -4463,14 +4224,11 @@ class Module:
         return left - cell[0] <= height * self.levelCellInside and spaceRight >= (right - left) * self.levelCellValue and spaceRight >= height * self.levelKeyReach
 
     def _cellPairAppend(self, keyList, memberList, height, verticalList, lineObject, pairList):
-        key = ""
+        joinObject = self._memberTextJoin(keyList)
 
-        bboxKeyList = list(keyList[0]["bbox"])
+        key = joinObject["text"]
 
-        for a in range(len(keyList)):
-            key = self._textAppend(key, keyList[a]["text"])
-
-            bboxKeyList = self._bboxExpand(bboxKeyList, keyList[a]["bbox"])
+        bboxKeyList = joinObject["bbox"]
 
         sectionList = self._sectionCollect(bboxKeyList, bboxKeyList[0], verticalList, height, lineObject["verticalList"], lineObject["horizontalList"])
 
@@ -4482,7 +4240,7 @@ class Module:
         bboxFullList = list(bboxKeyList)
 
         for a in range(len(memberList)):
-            bboxFullList = self._bboxExpand(bboxFullList, memberList[a]["bbox"])
+            bboxFullList = boxExpand(bboxFullList, memberList[a]["bbox"])
 
         pairList.append({
             "y": bboxKeyList[1],
@@ -4490,7 +4248,7 @@ class Module:
             "bboxKey": bboxKeyList,
             "bboxFull": bboxFullList,
             "section": sectionList[0]["text"] if len(sectionList) > 0 else "",
-            "group": " / ".join(groupList),
+            "group": separatorOption.join(groupList),
             "sectionList": sectionList,
             "row": "",
             "key": key,
@@ -4574,23 +4332,18 @@ class Module:
         for a in range(len(lineList)):
             for b in range(len(lineList[a])):
                 if len(text) > 0 and (lineList[a][b].get("isMark") or lineList[a][b].get("isOption")):
-                    text += " / "
+                    text += separatorOption
 
                 if lineList[a][b].get("isMark"):
-                    text += f"{self.textMark} "
+                    text += f"{textOptionMark} "
                 elif lineList[a][b].get("isOption"):
-                    text += f"{self.textOption} "
+                    text += f"{textOptionEmpty} "
 
                 text = self._textAppend(text, lineList[a][b]["text"])
 
-                bboxList = self._bboxExpand(bboxList, lineList[a][b]["bbox"])
+                bboxList = boxExpand(bboxList, lineList[a][b]["bbox"])
 
-        resultObject = dict(memberList[0])
-
-        resultObject["text"] = text
-        resultObject["bbox"] = bboxList
-
-        return resultObject
+        return self._memberMergeBuild(memberList[0], text, bboxList)
 
     def _cellBelowFreeCheck(self, cellBelowList, cellObject, itemList, cell):
         memberList = []
@@ -4666,7 +4419,7 @@ class Module:
         resultList = []
 
         for a in range(len(pairList)):
-            if pairList[a]["row"] == "" or pairList[a]["key"] == "" or self._numberValue(self._textClean(pairList[a]["row"])) < 0 or "anchor" not in pairList[a]:
+            if pairList[a]["row"] == "" or pairList[a]["key"] == "" or self._numberValue(categoryRemove(pairList[a]["row"], categoryBlankList)) < 0 or "anchor" not in pairList[a]:
                 continue
 
             rowObject = self._rowFind(pairList[a]["keyList"], pairList[a]["anchor"])
@@ -4700,7 +4453,7 @@ class Module:
         return " ".join(textList).strip()
 
     def _pairEnclosedCheck(self, pairObject):
-        text = self._textClean(pairObject["key"])
+        text = categoryRemove(pairObject["key"], categoryBlankList)
 
         return len(text) == 1 and unicodedata.category(text) == "No"
 
@@ -4743,7 +4496,7 @@ class Module:
 
                 continue
 
-            if len(self._textClean(pairObject["key"])) > self.countAttachKey:
+            if len(categoryRemove(pairObject["key"], categoryBlankList)) > self.countAttachKey:
                 resultList.append(pairObject)
 
                 continue
@@ -4779,7 +4532,7 @@ class Module:
             for b in range(len(attachList)):
                 textList.append(attachList[b]["text"])
 
-            rowBandList[a]["pair"]["value"] = " / ".join(textList)
+            rowBandList[a]["pair"]["value"] = separatorOption.join(textList)
 
         return resultList
 
@@ -4799,16 +4552,7 @@ class Module:
             if verticalList[a] not in sectionUsedList:
                 memberAllList.append({"text": verticalList[a]["text"], "bbox": verticalList[a]["bbox"], "isTitle": True, "titleObject": verticalList[a]})
 
-        cellObject = {}
-
-        for a in range(len(memberAllList)):
-            cell = self._cellProbe(memberAllList[a]["bbox"], height, lineObject)
-
-            if cell != None:
-                if cell not in cellObject:
-                    cellObject[cell] = []
-
-                cellObject[cell].append(memberAllList[a])
+        cellObject = self._cellGroupBuild(memberAllList, height, lineObject)
 
         margin = height * self.levelCellInside
 
@@ -4817,7 +4561,7 @@ class Module:
         for cell in cellObject:
             keyLineList = self._cellLineGroup(sorted(cellObject[cell], key=lambda itemObject: itemObject["bbox"][1]))
 
-            if cell[3] - cell[2] > height * self.levelCellHeaderBand or len(keyLineList) != 1 or self._cellPlainCheck(keyLineList[0]) == False or self._cellTitleCheck(keyLineList[0]) or self._letterContain(self._cellMemberMerge(keyLineList[0])["text"]) == False:
+            if cell[3] - cell[2] > height * self.levelCellHeaderBand or len(keyLineList) != 1 or self._cellPlainCheck(keyLineList[0]) == False or self._cellTitleCheck(keyLineList[0]) or categoryContainCheck(self._cellMemberMerge(keyLineList[0])["text"], categoryLetterList) == False:
                 continue
 
             cellBelowList = []
@@ -4857,7 +4601,7 @@ class Module:
 
             memberObject = self._cellMemberMerge(cellObject[cellBelowList[0]])
 
-            memberObject["text"] = " / ".join(textList)
+            memberObject["text"] = separatorOption.join(textList)
 
             self._cellPairAppend([self._cellMemberMerge(keyLineList[0])], [memberObject], height, verticalList, lineObject, pairList)
 
@@ -4904,11 +4648,11 @@ class Module:
         if len(valueList) < 2:
             return False
 
-        if len(self._textClean(self._cellMemberMerge(cellObject[valueList[0]])["text"])) <= self.countUnitMaximum:
+        if len(categoryRemove(self._cellMemberMerge(cellObject[valueList[0]])["text"], categoryBlankList)) <= self.countUnitMaximum:
             return False
 
         for a in range(1, len(valueList)):
-            if len(self._textClean(self._cellMemberMerge(cellObject[valueList[a]])["text"])) > self.countUnitMaximum:
+            if len(categoryRemove(self._cellMemberMerge(cellObject[valueList[a]])["text"], categoryBlankList)) > self.countUnitMaximum:
                 return False
 
         return True
@@ -4917,7 +4661,7 @@ class Module:
         usedList = []
 
         for a in range(len(restList)):
-            text = self._textClean(restList[a]["text"])
+            text = categoryRemove(restList[a]["text"], categoryBlankList)
 
             if len(text) < 2 or unicodedata.category(text[0]) != "Ps" or unicodedata.category(text[-1]) != "Pe":
                 continue
@@ -5034,7 +4778,7 @@ class Module:
 
                 for b in range(len(pairList[a]["keyList"])):
                     if pairList[a]["keyList"][b]["type"] == "key":
-                        bboxList = pairList[a]["keyList"][b]["bbox"] if bboxList == None else self._bboxExpand(bboxList, pairList[a]["keyList"][b]["bbox"])
+                        bboxList = pairList[a]["keyList"][b]["bbox"] if bboxList == None else boxExpand(bboxList, pairList[a]["keyList"][b]["bbox"])
             else:
                 bboxList = pairList[a].get("bboxKey")
 
@@ -5066,7 +4810,7 @@ class Module:
             return False
 
         for a in range(len(textSuffix)):
-            if self._wideCheck(textSuffix[a]) == False:
+            if wideCheck(textSuffix[a]) == False:
                 return True
 
         return len(textSuffix) < 2
@@ -5078,7 +4822,7 @@ class Module:
         return len(textItem) < 2 or self.reference.unitCheck(textItem) or self._scaleLabelCheck([{"text": textItem}]) or self.reference.captionCheck(textItem, self.reference.dateCaptionList + self.reference.currencyList)
 
     def _shortUnitCheck(self, itemObject, height):
-        textItem = self._textClean(itemObject["text"])
+        textItem = categoryRemove(itemObject["text"], categoryBlankList)
 
         if len(textItem) > self.countUnitMaximum:
             return False
@@ -5129,16 +4873,7 @@ class Module:
         return False
 
     def _cellAdjacentBuild(self, restList, height, lineObject, itemList, verticalList, pairList, pairKnownList):
-        cellObject = {}
-
-        for a in range(len(restList)):
-            cell = self._cellProbe(restList[a]["bbox"], height, lineObject)
-
-            if cell != None:
-                if cell not in cellObject:
-                    cellObject[cell] = []
-
-                cellObject[cell].append(restList[a])
+        cellObject = self._cellGroupBuild(restList, height, lineObject)
 
         margin = height * self.levelCellInside
 
@@ -5152,7 +4887,7 @@ class Module:
 
             keyObject = self._cellMemberMerge(memberList)
 
-            if self._shortUnitCheck(keyObject, height) or self._cellBlankCheck(memberList, height) or self._cellBoxBelowCheck(cell, height, lineObject, itemList) or self._cellSelfFieldCheck(cell, memberList, height) or self._letterContain(keyObject["text"]) == False or len(self._cellLineGroup(sorted(memberList, key=lambda itemObject: itemObject["bbox"][1]))) > self.countCellRow or self._cellBelowFreeCheck([cell], cellObject, itemList, cell) == False or self._cellLeftFilledCheck(cell, height, lineObject, restList):
+            if self._shortUnitCheck(keyObject, height) or self._cellBlankCheck(memberList, height) or self._cellBoxBelowCheck(cell, height, lineObject, itemList) or self._cellSelfFieldCheck(cell, memberList, height) or categoryContainCheck(keyObject["text"], categoryLetterList) == False or len(self._cellLineGroup(sorted(memberList, key=lambda itemObject: itemObject["bbox"][1]))) > self.countCellRow or self._cellBelowFreeCheck([cell], cellObject, itemList, cell) == False or self._cellLeftFilledCheck(cell, height, lineObject, restList):
                 continue
 
             centerY = (cell[2] + cell[3]) / 2
@@ -5194,7 +4929,7 @@ class Module:
 
             valueObject = self._cellMemberMerge(cellObject[valueList[0]])
 
-            valueObject["text"] = " / ".join(textList)
+            valueObject["text"] = separatorOption.join(textList)
 
             self._cellPairAppend([keyObject], [valueObject], height, verticalList, lineObject, pairList)
 
@@ -5315,7 +5050,7 @@ class Module:
 
             keyObject = self._cellMemberMerge(memberList)
 
-            if self.textOption in keyObject["text"] or self.textMark in keyObject["text"]:
+            if textOptionEmpty in keyObject["text"] or textOptionMark in keyObject["text"]:
                 continue
 
             isUnit = len(memberList) > 1
@@ -5324,7 +5059,7 @@ class Module:
                 if self._shortUnitCheck(memberList[a], height) == False:
                     isUnit = False
 
-            if isUnit or len(self._textClean(keyObject["text"])) < 2 or self._letterContain(keyObject["text"]) == False:
+            if isUnit or len(categoryRemove(keyObject["text"], categoryBlankList)) < 2 or categoryContainCheck(keyObject["text"], categoryLetterList) == False:
                 continue
 
             centerX = (cell[0] + cell[1]) / 2
@@ -5383,7 +5118,7 @@ class Module:
         bottom = 0
 
         for a in range(len(segment)):
-            text = self._textClean("".join(self._columnText(segment[a])))
+            text = categoryRemove("".join(self._columnText(segment[a])), categoryBlankList)
 
             if len(text) > self.countCaptionMaximum or self._letterOnlyCheck(text) == False:
                 return False
@@ -5475,7 +5210,7 @@ class Module:
         bboxValueList = list(valueList[0]["bbox"])
 
         for a in range(1, len(valueList)):
-            bboxValueList = self._bboxExpand(bboxValueList, valueList[a]["bbox"])
+            bboxValueList = boxExpand(bboxValueList, valueList[a]["bbox"])
 
         return self._wallCheck(lineList, segment[0]["x2"] - height * self.levelMargin, segment[1]["x1"] + height * self.levelMargin, bboxValueList)
 
@@ -5501,24 +5236,17 @@ class Module:
             for b in range(len(itemSortedList)):
                 bboxList = itemSortedList[b]["bbox"]
 
-                isAdded = False
+                index = -1
 
                 for c in range(len(columnList)):
                     overlap = self._overlap(bboxList[0], bboxList[2], columnList[c]["x1"], columnList[c]["x2"])
 
-                    if overlap < min(bboxList[2] - bboxList[0], columnList[c]["x2"] - columnList[c]["x1"]) * self.levelColumnOverlap:
-                        continue
+                    if overlap >= min(bboxList[2] - bboxList[0], columnList[c]["x2"] - columnList[c]["x1"]) * self.levelColumnItemOverlap:
+                        index = c
 
-                    columnList[c]["x1"] = min(columnList[c]["x1"], bboxList[0])
-                    columnList[c]["x2"] = max(columnList[c]["x2"], bboxList[2])
-                    columnList[c]["itemList"].append(itemSortedList[b])
+                        break
 
-                    isAdded = True
-
-                    break
-
-                if isAdded == False:
-                    columnList.append({"x1": bboxList[0], "x2": bboxList[2], "itemList": [itemSortedList[b]]})
+                columnGroupAppend(columnList, index, bboxList, itemSortedList[b])
 
             columnList.sort(key=lambda columnObject: columnObject["x1"])
 
@@ -5561,15 +5289,15 @@ class Module:
 
                 for c in range(len(segment)):
                     for d in range(len(segment[c]["itemList"])):
-                        if self._shortTextUnitCheck(self._textClean(segment[c]["itemList"][d]["text"])) == False:
+                        if self._shortTextUnitCheck(categoryRemove(segment[c]["itemList"][d]["text"], categoryBlankList)) == False:
                             isShort = False
 
-                keyText = self._textClean("".join(self._columnText(segment[0])))
+                keyText = categoryRemove("".join(self._columnText(segment[0])), categoryBlankList)
 
                 isSymbol = False
 
                 for c in range(len(segment)):
-                    if self._symbolCheck(self._textClean("".join(self._columnText(segment[c])))):
+                    if self._symbolCheck(categoryRemove("".join(self._columnText(segment[c])), categoryBlankList)):
                         isSymbol = True
 
                 cellKey = self._cellProbe(segment[0]["itemList"][0]["bbox"], height, {"verticalList": lineList, "horizontalList": horizontalList})
@@ -5582,7 +5310,7 @@ class Module:
 
                 isLeft = cellKey != None and (self._cellLeftFilledCheck(cellKey, height, {"verticalList": lineList, "horizontalList": horizontalList}, restPlainList) or self._cellSelfFieldCheck(cellKey, segment[0]["itemList"], height))
 
-                if len(segment) < 2 or isShort or isSymbol or isLeft or self._letterContain(keyText) == False or self._segmentFreeCheck(segment) or self._segmentCaptionCheck(segment, itemList, height, horizontalList) or self._shortTextUnitCheck(keyText) or self._columnOption(segment[0]) or self._segmentLabelRowCheck(segment, height, horizontalList, lineList) or self._segmentLabelPairCheck(segment, lineList, height, itemList) or self._segmentWallCheck(segment, lineList, height) == False:
+                if len(segment) < 2 or isShort or isSymbol or isLeft or categoryContainCheck(keyText, categoryLetterList) == False or self._segmentFreeCheck(segment) or self._segmentCaptionCheck(segment, itemList, height, horizontalList) or self._shortTextUnitCheck(keyText) or self._columnOption(segment[0]) or self._segmentLabelRowCheck(segment, height, horizontalList, lineList) or self._segmentLabelPairCheck(segment, lineList, height, itemList) or self._segmentWallCheck(segment, lineList, height) == False:
                     lineTextList = []
 
                     bboxLineList = None
@@ -5607,7 +5335,7 @@ class Module:
                         for d in range(len(columnItemList)):
                             text = self._spaceNormalize(columnItemList[d]["text"])
 
-                            lineTextList.append(f"{self.textMark} {text}" if columnItemList[d].get("isMark") else f"{self.textOption} {text}" if columnItemList[d].get("isOption") and (countOption > 1 or columnItemList[d].get("circleIndex", -1) < 0) else text)
+                            lineTextList.append(f"{textOptionMark} {text}" if columnItemList[d].get("isMark") else f"{textOptionEmpty} {text}" if columnItemList[d].get("isOption") and (countOption > 1 or columnItemList[d].get("circleIndex", -1) < 0) else text)
 
                             bboxList = columnItemList[d]["bbox"]
 
@@ -5638,9 +5366,9 @@ class Module:
 
                         bboxSegmentList = list(bboxList) if bboxSegmentList == None else [min(bboxSegmentList[0], bboxList[0]), min(bboxSegmentList[1], bboxList[1]), max(bboxSegmentList[2], bboxList[2]), max(bboxSegmentList[3], bboxList[3])]
 
-                    textPart = "".join(partList) if self._wideCheck((partList[0] or " ")[-1:] or " ") else " ".join(partList)
+                    textPart = "".join(partList) if wideCheck((partList[0] or " ")[-1:] or " ") else " ".join(partList)
 
-                    textList.append(f"{self.textMark} {textPart}" if isMark else f"{self.textOption} {textPart}" if c > 0 and self._columnOption(segment[c]) else textPart)
+                    textList.append(f"{textOptionMark} {textPart}" if isMark else f"{textOptionEmpty} {textPart}" if c > 0 and self._columnOption(segment[c]) else textPart)
 
                 sectionList = self._sectionCollect(bboxSegmentList, bboxSegmentList[0], verticalList, height, lineList, horizontalList)
 
@@ -5653,12 +5381,12 @@ class Module:
                     "y": bboxSegmentList[1],
                     "bbox": bboxSegmentList,
                     "section": sectionList[0]["text"] if len(sectionList) > 0 else "",
-                    "group": " / ".join(groupList),
+                    "group": separatorOption.join(groupList),
                     "sectionList": sectionList,
                     "row": "",
                     "key": textList[0],
                     "formula": "",
-                    "value": " / ".join(textList[1:])
+                    "value": separatorOption.join(textList[1:])
                 })
 
         return {"pairList": pairList, "lineItemList": lineItemList}
@@ -5708,7 +5436,7 @@ class Module:
                 if itemObject.get("isBoxOption"):
                     continue
 
-                lastObject["text"] = lastObject["text"] + ("" if self._wideCheck(lastObject["text"][-1:] or " ") else " ") + itemObject["text"]
+                lastObject["text"] = lastObject["text"] + ("" if wideCheck(lastObject["text"][-1:] or " ") else " ") + itemObject["text"]
                 lastObject["bbox"] = [min(lastObject["bbox"][0], bboxList[0]), lastObject["bbox"][1], max(lastObject["bbox"][2], bboxList[2]), bboxList[3]]
                 lastObject["lastBbox"] = bboxList
                 lastObject["isMark"] = lastObject.get("isMark", False) or itemObject.get("isMark", False)
@@ -5960,13 +5688,13 @@ class Module:
 
         for a in range(len(itemList)):
             if itemList[a]["type"] == "row":
-                rowNumberList.append(self._numberValue(self._textClean(itemList[a]["text"])))
+                rowNumberList.append(self._numberValue(categoryRemove(itemList[a]["text"], categoryBlankList)))
 
         for a in range(len(itemList)):
             if itemList[a]["type"] != "value":
                 continue
 
-            text = self._textClean(itemList[a]["text"])
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
 
             if self._formulaCheck(text) == False and self._referenceCheck(text, rowNumberList) == False:
                 continue
@@ -6251,10 +5979,7 @@ class Module:
                     if gap > height * self.levelLineGap:
                         continue
 
-                    if bboxList[1] < bboxKeyList[1] and self._ruleBetweenCheck(horizontalList, bboxList, bboxKeyList):
-                        continue
-
-                    if bboxList[1] > bboxKeyList[1] and self._ruleBetweenCheck(horizontalList, bboxKeyList, bboxList):
+                    if self._ruleCrossCheck(bboxList, bboxKeyList, horizontalList):
                         continue
 
                     isNear = True
@@ -6299,18 +6024,7 @@ class Module:
 
             centerX = (bboxList[0] + bboxList[2]) / 2
 
-            isAdded = False
-
-            for b in range(len(columnList)):
-                if abs(columnList[b]["centerX"] - centerX) <= height * self.levelRowColumn:
-                    columnList[b]["itemList"].append(verticalList[a])
-
-                    isAdded = True
-
-                    break
-
-            if isAdded == False:
-                columnList.append({"centerX": centerX, "itemList": [verticalList[a]]})
+            self._columnCenterAppend(columnList, centerX, height, verticalList[a])
 
         sectionList = []
 
@@ -6358,7 +6072,7 @@ class Module:
         for a in range(len(itemList)):
             bboxOtherList = itemList[a]["bbox"]
 
-            if self._overlap(bboxOtherList[0], bboxOtherList[2], bboxList[0], bboxList[2]) > min(bboxOtherList[2] - bboxOtherList[0], bboxList[2] - bboxList[0]) * self.levelColumnOverlap:
+            if self._overlap(bboxOtherList[0], bboxOtherList[2], bboxList[0], bboxList[2]) > min(bboxOtherList[2] - bboxOtherList[0], bboxList[2] - bboxList[0]) * self.levelColumnItemOverlap:
                 return True
 
         return False
@@ -6373,7 +6087,7 @@ class Module:
 
             if len(lineList) > 0 and lineList[len(lineList) - 1]["column"] == column and self._rangeCheck(lineList[len(lineList) - 1]["bbox"], keySortedList[a]["bbox"]) and self._stackCheck(lineList[len(lineList) - 1]["itemList"], keySortedList[a]["bbox"]) == False:
                 lineList[len(lineList) - 1]["itemList"].append(keySortedList[a])
-                lineList[len(lineList) - 1]["bbox"] = self._bboxExpand(lineList[len(lineList) - 1]["bbox"], keySortedList[a]["bbox"])
+                lineList[len(lineList) - 1]["bbox"] = boxExpand(lineList[len(lineList) - 1]["bbox"], keySortedList[a]["bbox"])
 
                 continue
 
@@ -6430,7 +6144,7 @@ class Module:
             value = anchorObject["text"].strip()
 
             if self._digitSpaceCheck(value):
-                value = self._digitNormalize(self._textClean(value))
+                value = self._digitNormalize(categoryRemove(value, categoryBlankList))
 
             if "suffix" in anchorObject:
                 value = f"{value} {anchorObject['suffix']}"
@@ -6454,7 +6168,7 @@ class Module:
             "keyList": keyList,
             "y": anchorObject["bbox"][1],
             "section": sectionList[0]["text"] if len(sectionList) > 0 else "",
-            "group": " / ".join(groupList),
+            "group": separatorOption.join(groupList),
             "sectionList": sectionList,
             "row": " ".join(rowTextList),
             "key": " ".join(textList),
@@ -6482,9 +6196,7 @@ class Module:
             if pairObject["anchor"]["type"] == "value" and self._overlap(pairObject["anchor"]["bbox"][0], pairObject["anchor"]["bbox"][2], bboxList[0], bboxList[2]) <= 0:
                 continue
 
-            bandList = self._bandFind(rowObject["bbox"], horizontalList)
-
-            if bandList == None or centerY < bandList[0] or centerY > bandList[1]:
+            if self._bandInsideCheck(rowObject["bbox"], horizontalList, centerY) == False:
                 continue
 
             if rowRight == None or rowObject["bbox"][2] > rowRight:
@@ -6511,7 +6223,7 @@ class Module:
 
                 continue
 
-            if anchorObject["type"] != "value" or pairObject["key"] != "" or pairObject["row"] != "" or pairObject["formula"] != "" or self._bareNumberCheck(self._textClean(anchorObject["text"])) == False:
+            if anchorObject["type"] != "value" or pairObject["key"] != "" or pairObject["row"] != "" or pairObject["formula"] != "" or self._bareNumberCheck(categoryRemove(anchorObject["text"], categoryBlankList)) == False:
                 continue
 
             leftObject = None
@@ -6536,9 +6248,9 @@ class Module:
                 if bandObject["value"] == "":
                     bandObject["value"] = pairObject["value"]
                 elif bandObject["anchor"]["bbox"][1] > anchorObject["bbox"][1]:
-                    bandObject["value"] = f"{pairObject['value']} / {bandObject['value']}"
+                    bandObject["value"] = f"{pairObject['value']}{separatorOption}{bandObject['value']}"
                 else:
-                    bandObject["value"] = f"{bandObject['value']} / {pairObject['value']}"
+                    bandObject["value"] = f"{bandObject['value']}{separatorOption}{pairObject['value']}"
 
                 mergedList.append(pairObject)
 
@@ -6551,7 +6263,7 @@ class Module:
                 if pairSortedList[b]["anchor"] is leftObject:
                     targetObject = targetList[b]
 
-                    targetObject["value"] = f"{targetObject['value']} / {pairObject['value']}"
+                    targetObject["value"] = f"{targetObject['value']}{separatorOption}{pairObject['value']}"
 
                     targetList[a] = targetObject
 
@@ -6588,12 +6300,12 @@ class Module:
         otherPairList = []
 
         for a in range(len(pairList)):
-            if pairList[a]["row"] != "" and self._numberValue(self._textClean(pairList[a]["row"])) >= 0:
+            if pairList[a]["row"] != "" and self._numberValue(categoryRemove(pairList[a]["row"], categoryBlankList)) >= 0:
                 rowPairList.append(pairList[a])
             else:
                 otherPairList.append(pairList[a])
 
-        rowPairList.sort(key=lambda pairObject: self._numberValue(self._textClean(pairObject["row"])))
+        rowPairList.sort(key=lambda pairObject: self._numberValue(categoryRemove(pairObject["row"], categoryBlankList)))
 
         for a in range(1, len(rowPairList) - 1):
             if rowPairList[a]["section"] == "" and rowPairList[a - 1]["section"] == rowPairList[a + 1]["section"]:
@@ -6737,7 +6449,7 @@ class Module:
 
         return sorted(pairList, key=lambda pairObject: (orderList.index(pairObject["section"]), pairObject["block"], pairObject["column"], pairObject["order"]))
 
-    def _cellEscape(self, text):
+    def _cellSeparatorEscape(self, text):
         return text.replace("|", "\\|")
 
     def _templateZeroMark(self, itemList):
@@ -6747,7 +6459,7 @@ class Module:
             font = itemList[a].get("font", "")
 
             if itemList[a]["type"] == "key" and font != "":
-                countObject[font] = countObject.get(font, 0) + len(self._textClean(itemList[a]["text"]))
+                countObject[font] = countObject.get(font, 0) + len(categoryRemove(itemList[a]["text"], categoryBlankList))
 
         fontKey = ""
 
@@ -6774,7 +6486,7 @@ class Module:
                 if partList[b].get("font", "") != fontKey:
                     isTemplate = False
 
-            textValue = self._textClean(itemList[a]["text"])
+            textValue = categoryRemove(itemList[a]["text"], categoryBlankList)
 
             if isTemplate == False and self._bareNumberCheck(textValue):
                 isFilled = True
@@ -6801,7 +6513,7 @@ class Module:
         bboxList = list(self._pairBboxFind(pairObject))
 
         for a in range(len(pairObject.get("keyList", []))):
-            bboxList = self._bboxExpand(bboxList, pairObject["keyList"][a]["bbox"])
+            bboxList = boxExpand(bboxList, pairObject["keyList"][a]["bbox"])
 
         return bboxList
 
@@ -6904,15 +6616,6 @@ class Module:
 
         return {"itemList": resultList, "lineObject": lineResultObject}
 
-    def _skeletonText(self, text):
-        result = ""
-
-        for a in range(len(text)):
-            if text[a].isdigit() == False and text[a].isspace() == False:
-                result += text[a]
-
-        return result
-
     def _lineStackJoin(self, lineList, height):
         resultList = []
 
@@ -6929,8 +6632,8 @@ class Module:
                 gap = bboxList[1] - bboxOtherList[3]
 
                 if resultList[b]["skeleton"] == lineSortedList[a]["skeleton"] and abs(bboxList[0] - bboxOtherList[0]) <= height * self.levelMargin and abs(bboxList[2] - bboxOtherList[2]) <= height * self.levelMargin and gap >= 0 and gap <= (bboxList[3] - bboxList[1]) * self.levelStackGap:
-                    resultList[b]["text"] = f"{resultList[b]['text']} / {lineSortedList[a]['text']}"
-                    resultList[b]["bbox"] = self._bboxExpand(bboxOtherList, bboxList)
+                    resultList[b]["text"] = f"{resultList[b]['text']}{separatorOption}{lineSortedList[a]['text']}"
+                    resultList[b]["bbox"] = boxExpand(bboxOtherList, bboxList)
 
                     isJoined = True
 
@@ -6945,7 +6648,7 @@ class Module:
         countObject = {}
 
         for a in range(len(pairList)):
-            key = self._textClean(pairList[a]["key"])
+            key = categoryRemove(pairList[a]["key"], categoryBlankList)
 
             if pairList[a]["row"] == "" and pairList[a]["formula"] == "" and len(key) > 0 and self._shortTextUnitCheck(key):
                 countObject[key] = countObject.get(key, 0) + 1
@@ -6954,14 +6657,14 @@ class Module:
         lineList = []
 
         for a in range(len(pairList)):
-            key = self._textClean(pairList[a]["key"])
+            key = categoryRemove(pairList[a]["key"], categoryBlankList)
 
             if pairList[a]["row"] != "" or pairList[a]["formula"] != "" or countObject.get(key, 0) < 2:
                 resultList.append(pairList[a])
 
                 continue
 
-            lineList.append({"text": f"{pairList[a]['key']} {pairList[a]['value']}", "bbox": self._pairBboxFull(pairList[a]), "skeleton": self._skeletonText(f"{pairList[a]['key']} {pairList[a]['value']}")})
+            lineList.append({"text": f"{pairList[a]['key']} {pairList[a]['value']}", "bbox": self._pairBboxFull(pairList[a]), "skeleton": categoryRemove(f"{pairList[a]['key']} {pairList[a]['value']}", categorySkeletonList)})
 
         lineList = self._lineStackJoin(lineList, height)
 
@@ -6979,7 +6682,7 @@ class Module:
 
                 if gap >= -height * self.levelMargin and gap <= height * self.levelFieldGap and self._overlap(bboxList[1], bboxList[3], bboxLineList[1], bboxLineList[3]) >= min(bboxList[3] - bboxList[1], bboxLineList[3] - bboxLineList[1]) * self.levelParagraphOverlap:
                     lineList[b]["text"] = f"{lineList[b]['text']} | {restList[a]['text']}"
-                    lineList[b]["bbox"] = self._bboxExpand(bboxLineList, bboxList)
+                    lineList[b]["bbox"] = boxExpand(bboxLineList, bboxList)
 
                     isJoined = True
 
@@ -7024,7 +6727,7 @@ class Module:
                 isAdded = True
 
             if len(memberList) > 0 and bottom == cell[3]:
-                self.countHeaderRow = len(memberList)
+                self.countHeaderMember = len(memberList)
 
             bottom = bottomNext
 
@@ -7064,7 +6767,7 @@ class Module:
         for a in range(len(candidateList)):
             cell = cellList[a]
 
-            if cell == None or cellList.count(cell) > 1 or self._letterContain(candidateList[a]["text"]) == False or self.textOption in candidateList[a]["text"] or self.textMark in candidateList[a]["text"] or self.reference.sentenceEndCheck(candidateList[a]["text"]):
+            if cell == None or cellList.count(cell) > 1 or categoryContainCheck(candidateList[a]["text"], categoryLetterList) == False or textOptionEmpty in candidateList[a]["text"] or textOptionMark in candidateList[a]["text"] or self.reference.sentenceTerminalCheck(candidateList[a]["text"]):
                 continue
 
             isAlone = True
@@ -7083,7 +6786,7 @@ class Module:
             if isAlone == False or self._cellBlockCheck(cell, lineObject) or (candidateList[a]["pair"] != None and self._ruleContinueCheck(cell, height, lineObject["horizontalList"]) and self._cellRightEmptyCheck(cell, height, lineObject, itemList)):
                 continue
 
-            self.countHeaderRow = 0
+            self.countHeaderMember = 0
 
             memberList = self._headerMemberList(cell, pairList, height, candidateList[a]["pair"], lineObject)
 
@@ -7094,7 +6797,7 @@ class Module:
             if len(memberList) < 2:
                 continue
 
-            isSection = len(memberList) > self.countHeaderRow
+            isSection = len(memberList) > self.countHeaderMember
 
             if isSection:
                 sectionList = []
@@ -7112,7 +6815,7 @@ class Module:
                 if isSection and memberList[b]["section"] == "":
                     memberList[b]["section"] = candidateList[a]["text"]
                 else:
-                    memberList[b]["group"] = candidateList[a]["text"] if memberList[b]["group"] == "" else f"{candidateList[a]['text']} / {memberList[b]['group']}"
+                    memberList[b]["group"] = candidateList[a]["text"] if memberList[b]["group"] == "" else f"{candidateList[a]['text']}{separatorOption}{memberList[b]['group']}"
 
             if candidateList[a]["rest"] != None:
                 restUsedList.append(candidateList[a]["rest"])
@@ -7381,7 +7084,7 @@ class Module:
             for b in range(len(restList)):
                 bboxList = restList[b]["bbox"]
 
-                if restList[b] in usedList or "lineList" in restList[b] or self._letterContain(restList[b]["text"]) == False or self.textOption in restList[b]["text"] or self.textMark in restList[b]["text"]:
+                if restList[b] in usedList or "lineList" in restList[b] or categoryContainCheck(restList[b]["text"], categoryLetterList) == False or textOptionEmpty in restList[b]["text"] or textOptionMark in restList[b]["text"]:
                     continue
 
                 if self._overlap(bboxList[1], bboxList[3], bboxCombList[1], bboxCombList[3]) <= 0 or bboxList[0] >= bboxCombList[0] or bboxCombList[0] - bboxList[2] > height * self.levelKeyGap:
@@ -7394,7 +7097,7 @@ class Module:
                 usedList.append(restObject)
 
         for a in range(len(restList)):
-            if restList[a] in usedList or "lineList" in restList[a] or restList[a].get("isOutside") or restList[a].get("isJoin") or self._letterContain(restList[a]["text"]) == False or self.textOption in restList[a]["text"] or self.textMark in restList[a]["text"]:
+            if restList[a] in usedList or "lineList" in restList[a] or restList[a].get("isOutside") or restList[a].get("isJoin") or categoryContainCheck(restList[a]["text"], categoryLetterList) == False or textOptionEmpty in restList[a]["text"] or textOptionMark in restList[a]["text"]:
                 continue
 
             if self._lineWrapRoomCheck(restList[a]["bbox"], itemList, lineObject, height):
@@ -7403,7 +7106,7 @@ class Module:
         removeList = []
 
         for a in range(len(restList)):
-            if restList[a] in usedList or restList[a] in removeList or "lineList" in restList[a] or restList[a].get("isOutside") or restList[a].get("isJoin") or self._letterContain(restList[a]["text"]) == False or self.textOption in restList[a]["text"] or self.textMark in restList[a]["text"]:
+            if restList[a] in usedList or restList[a] in removeList or "lineList" in restList[a] or restList[a].get("isOutside") or restList[a].get("isJoin") or categoryContainCheck(restList[a]["text"], categoryLetterList) == False or textOptionEmpty in restList[a]["text"] or textOptionMark in restList[a]["text"]:
                 continue
 
             if self._lineUnderlineCheck(restList[a]["bbox"], itemList, lineObject, height) == False:
@@ -7421,11 +7124,11 @@ class Module:
 
                     gap = fieldObject["bbox"][1] - bboxList[3]
 
-                    if restList[b] is restList[a] or restList[b] in usedList or restList[b] in removeList or "lineList" in restList[b] or restList[b].get("isJoin") or abs(bboxList[0] - fieldObject["bbox"][0]) > height * self.levelMargin or gap < -height * self.levelLineGap or gap > height * self.levelOptionLineGap or self.textOption in restList[b]["text"] or self.textMark in restList[b]["text"]:
+                    if restList[b] is restList[a] or restList[b] in usedList or restList[b] in removeList or "lineList" in restList[b] or restList[b].get("isJoin") or abs(bboxList[0] - fieldObject["bbox"][0]) > height * self.levelMargin or gap < -height * self.levelLineGap or gap > height * self.levelOptionLineGap or textOptionEmpty in restList[b]["text"] or textOptionMark in restList[b]["text"]:
                         continue
 
                     fieldObject["text"] = self._textAppend(restList[b]["text"], fieldObject["text"])
-                    fieldObject["bbox"] = self._bboxExpand(fieldObject["bbox"], bboxList)
+                    fieldObject["bbox"] = boxExpand(fieldObject["bbox"], bboxList)
 
                     removeList.append(restList[b])
 
@@ -7502,9 +7205,7 @@ class Module:
                 if bboxList[0] >= rightColumn:
                     continue
 
-                bandList = self._bandFind(rowObject["bbox"], horizontalList)
-
-                if bandList == None or centerY < bandList[0] or centerY > bandList[1]:
+                if self._bandInsideCheck(rowObject["bbox"], horizontalList, centerY) == False:
                     continue
 
                 if rowRight == None or rowObject["bbox"][2] > rowRight:
@@ -7526,7 +7227,7 @@ class Module:
                 "column": pairBest.get("column", 0),
                 "block": pairBest.get("block", 0),
                 "row": pairBest["row"],
-                "key": f"{pairBest['key']} / {restList[a]['text']}",
+                "key": f"{pairBest['key']}{separatorOption}{restList[a]['text']}",
                 "formula": "",
                 "value": "",
                 "unit": pairBest.get("unit", "")
@@ -7536,7 +7237,7 @@ class Module:
 
     def _keyQualifierAssign(self, pairList, height):
         for a in range(len(pairList)):
-            key = self._textClean(pairList[a]["key"])
+            key = categoryRemove(pairList[a]["key"], categoryBlankList)
 
             if len(key) < 3 or unicodedata.category(key[0]) != "Ps" or unicodedata.category(key[-1]) != "Pe" or self._bracketCount(key[1:-1]) != 0:
                 continue
@@ -7569,7 +7270,7 @@ class Module:
 
                     break
 
-            textCaption = self._textClean(itemBeforeList[a]["text"])
+            textCaption = categoryRemove(itemBeforeList[a]["text"], categoryBlankList)
 
             if isUsed and itemBeforeList[a]["type"] == "key" and len(textCaption) > 0 and textCaption not in resultList:
                 resultList.append(textCaption)
@@ -7590,7 +7291,7 @@ class Module:
         for a in range(len(itemSortedList)):
             itemObject = itemSortedList[a]
 
-            textItem = self._textClean(itemObject["text"])
+            textItem = categoryRemove(itemObject["text"], categoryBlankList)
 
             if itemObject in removeList or len(textItem) != 1 or self._captionSmallCheck(itemObject, height, lineObject) == False or self.reference.dateLetterCheck(textItem) == False:
                 continue
@@ -7605,7 +7306,7 @@ class Module:
                 if candidateObject in removeList or self._rangeCheck(candidateObject["bbox"], bboxLastList) == False or self._captionSmallCheck(candidateObject, height, lineObject) == False:
                     continue
 
-                if self._textClean(candidateObject["text"]) != textItem or candidateObject["bbox"][0] - bboxLastList[2] > height * self.levelLetterGap:
+                if categoryRemove(candidateObject["text"], categoryBlankList) != textItem or candidateObject["bbox"][0] - bboxLastList[2] > height * self.levelLetterGap:
                     break
 
                 chainList.append(candidateObject)
@@ -7620,7 +7321,7 @@ class Module:
             joinObject["charList"] = []
 
             for b in range(len(chainList)):
-                joinObject["bbox"] = self._bboxExpand(joinObject["bbox"], chainList[b]["bbox"])
+                joinObject["bbox"] = boxExpand(joinObject["bbox"], chainList[b]["bbox"])
 
                 removeList.append(chainList[b])
 
@@ -7912,7 +7613,7 @@ class Module:
                 tableList.append({"pairList": [], "bboxList": [], "bbox": list(bboxList), "isOrdered": True, "lineObject": {}, "beforeList": [], "isHeading": a == 0 or pairList[a]["section"] != pairList[a - 1]["section"]})
 
                 if len(pairList[a]["sectionList"]) > 0:
-                    tableList[len(tableList) - 1]["bbox"] = self._bboxExpand(bboxList, pairList[a]["sectionList"][0]["bbox"])
+                    tableList[len(tableList) - 1]["bbox"] = boxExpand(bboxList, pairList[a]["sectionList"][0]["bbox"])
 
             tableObject = tableList[len(tableList) - 1]
 
@@ -7921,7 +7622,7 @@ class Module:
 
             tableObject["pairList"].append(pairList[a])
             tableObject["bboxList"].append(bboxList)
-            tableObject["bbox"] = self._bboxExpand(tableObject["bbox"], bboxList)
+            tableObject["bbox"] = boxExpand(tableObject["bbox"], bboxList)
 
         return tableList
 
@@ -7969,7 +7670,7 @@ class Module:
 
                 index = len(tableObject["pairList"])
 
-                if tableObject["isOrdered"] and (len(self._textClean(restList[a]["text"])) > self.countLineSplit or bboxList[1] < tableObject["bboxList"][0][1]):
+                if tableObject["isOrdered"] and (len(categoryRemove(restList[a]["text"], categoryBlankList)) > self.countLineSplit or bboxList[1] < tableObject["bboxList"][0][1]):
                     for c in range(len(tableObject["bboxList"])):
                         if tableObject["bboxList"][c][1] > bboxList[1]:
                             index = c
@@ -8007,7 +7708,7 @@ class Module:
 
         return resultList
 
-    def _tableWrite(self, pairList, restList):
+    def _tablePairWrite(self, pairList, restList):
         tableList = self._tableBuild(pairList)
 
         restList = self._tableLineAssign(tableList, restList)
@@ -8061,7 +7762,7 @@ class Module:
                 cellList = []
 
                 for c in range(len(columnList)):
-                    cellList.append(self._cellEscape(self._spaceNormalize(tableObject["pairList"][b].get(columnList[c], ""))))
+                    cellList.append(self._cellSeparatorEscape(self._spaceNormalize(tableObject["pairList"][b].get(columnList[c], ""))))
 
                 lineList.append(f"| {' | '.join(cellList)} |")
 
@@ -8130,7 +7831,7 @@ class Module:
         for a in range(len(itemList)):
             cell = self._cellFind(itemList[a]["bbox"], lineObject)
 
-            if cell != None and cell[1] - cell[0] <= height * self.levelCellLabel and self._rowIdCheck(self._textClean(itemList[a]["text"])):
+            if cell != None and cell[1] - cell[0] <= height * self.levelCellLabel and self._rowIdCheck(categoryRemove(itemList[a]["text"], categoryBlankList)):
                 boxList.append(itemList[a])
 
                 cellList.append(cell)
@@ -8142,7 +7843,7 @@ class Module:
         for a in range(len(boxList)):
             bboxList = boxList[a]["bbox"]
 
-            textId = self._textClean(boxList[a]["text"])
+            textId = categoryRemove(boxList[a]["text"], categoryBlankList)
 
             left = None
 
@@ -8171,7 +7872,7 @@ class Module:
 
                 tokenRow = textRow.split(" ")[0]
 
-                if tokenRow != textId and (self._rangeCheck(rowList[b]["bbox"], bboxList) == False or len(tokenRow) > self.countUnitMaximum or textId.endswith(tokenRow) == False or self._letterContain(tokenRow) == False):
+                if tokenRow != textId and (self._rangeCheck(rowList[b]["bbox"], bboxList) == False or len(tokenRow) > self.countUnitMaximum or textId.endswith(tokenRow) == False or categoryContainCheck(tokenRow, categoryLetterList) == False):
                     continue
 
                 removeList.append(rowList[b])
@@ -8203,7 +7904,7 @@ class Module:
                 if abs(tokenList[b]["bbox"][0] - bboxList[0]) <= height * self.levelMargin:
                     count += 1
 
-            if resultList[a].get("isRowBox") or count < self.countRowMinimum or self._rowIdCheck(self._textClean(resultList[a]["text"])) == False:
+            if resultList[a].get("isRowBox") or count < self.countRowMinimum or self._rowIdCheck(categoryRemove(resultList[a]["text"], categoryBlankList)) == False:
                 continue
 
             resultList[a]["isRowBox"] = True
@@ -8280,14 +7981,11 @@ class Module:
 
                 memberList.append(edgeList[b])
 
-            textTitle = ""
+            joinObject = self._memberTextJoin(memberList)
 
-            bboxTitleList = list(memberList[0]["bbox"])
+            textTitle = joinObject["text"]
 
-            for b in range(len(memberList)):
-                textTitle = self._textAppend(textTitle, memberList[b]["text"])
-
-                bboxTitleList = self._bboxExpand(bboxTitleList, memberList[b]["bbox"])
+            bboxTitleList = joinObject["bbox"]
 
             bodyLeft = None
 
@@ -8360,7 +8058,7 @@ class Module:
                 for c in range(len(rowList[b])):
                     textRow = self._textAppend(textRow, rowList[b][c]["text"])
 
-                    bboxList = self._bboxExpand(bboxList, rowList[b][c]["bbox"])
+                    bboxList = boxExpand(bboxList, rowList[b][c]["bbox"])
 
                 isJoin = len(paragraphList) > 0
 
@@ -8380,7 +8078,7 @@ class Module:
                     continue
 
                 paragraphObject["text"] = self._textAppend(paragraphObject["text"], textRow)
-                paragraphObject["bbox"] = self._bboxExpand(paragraphObject["bbox"], bboxList)
+                paragraphObject["bbox"] = boxExpand(paragraphObject["bbox"], bboxList)
                 paragraphObject["bboxLast"] = bboxList
 
             for b in range(len(paragraphList)):
@@ -8437,7 +8135,7 @@ class Module:
             cellList = []
 
             for b in range(len(columnList)):
-                cellList.append(self._cellEscape(self._spaceNormalize(pairList[a].get(columnList[b], ""))))
+                cellList.append(self._cellSeparatorEscape(self._spaceNormalize(pairList[a].get(columnList[b], ""))))
 
             lineList.append(f"| {' | '.join(cellList)} |")
 
@@ -8547,7 +8245,7 @@ class Module:
         return (left, right)
 
     def _markerText(self, textItem):
-        result = self._textClean(textItem)
+        result = categoryRemove(textItem, categoryBlankList)
 
         while len(result) > 0 and result[0] in self.reference.leaderList:
             result = result[1:]
@@ -8569,7 +8267,7 @@ class Module:
         return count > 0 and count <= self.countUnitMaximum
 
     def _rowIdColumnCheck(self, itemObject, bboxIdList):
-        textItem = self._textClean(itemObject["text"])
+        textItem = categoryRemove(itemObject["text"], categoryBlankList)
 
         if len(textItem) == 0 or len(textItem) > self.countRowId:
             return False
@@ -8683,13 +8381,7 @@ class Module:
         return sorted(resultList, key=lambda itemObject: (itemObject["bbox"][1], itemObject["bbox"][0]))
 
     def _optionLineBuild(self, itemList, circleList, lineObject, height, itemRawList, bboxIdList):
-        boxList = []
-
-        for a in range(len(circleList)):
-            if circleList[a].get("isBox"):
-                boxList.append(circleList[a])
-
-        boxList.sort(key=lambda boxObject: (boxObject["bbox"][1], boxObject["bbox"][0]))
+        boxList = self._boxSortedList(circleList)
 
         groupList = []
 
@@ -8868,7 +8560,7 @@ class Module:
                 claimList.append(rowObject)
 
             for b in range(len(optionList)):
-                textOption = self.textMark if optionList[b]["box"].get("isMark") else self.textOption
+                textOption = textOptionMark if optionList[b]["box"].get("isMark") else textOptionEmpty
 
                 if optionList[b]["marker"] != None:
                     textOption = f"{self._markerText(optionList[b]['marker']['text'])} {textOption}"
@@ -8900,7 +8592,7 @@ class Module:
 
                 mergeObject = dict(keyList[0]) if len(keyList) > 0 else dict(claimList[0])
 
-                mergeObject["text"] = self._textAppend(textKey, " / ".join(textOptionList))
+                mergeObject["text"] = self._textAppend(textKey, separatorOption.join(textOptionList))
                 mergeObject["charList"] = []
                 mergeObject["isOptionLine"] = True
 
@@ -8909,7 +8601,7 @@ class Module:
                 mergeList = keyList + claimList
 
                 for b in range(len(mergeList)):
-                    bboxMergeList = self._bboxExpand(bboxMergeList, mergeList[b]["bbox"])
+                    bboxMergeList = boxExpand(bboxMergeList, mergeList[b]["bbox"])
 
                     if mergeList[b].get("isRowStart"):
                         mergeObject["isRowStart"] = True
@@ -8936,15 +8628,15 @@ class Module:
             bboxKeyList = list(keyList[0]["bbox"]) if len(keyList) > 0 else list(rowObject["bbox"])
 
             for b in range(len(keyList)):
-                bboxKeyList = self._bboxExpand(bboxKeyList, keyList[b]["bbox"])
+                bboxKeyList = boxExpand(bboxKeyList, keyList[b]["bbox"])
 
             bboxFullList = list(bboxKeyList)
 
             for b in range(len(claimList)):
-                bboxFullList = self._bboxExpand(bboxFullList, claimList[b]["bbox"])
+                bboxFullList = boxExpand(bboxFullList, claimList[b]["bbox"])
 
             for b in range(len(groupBoxList)):
-                bboxFullList = self._bboxExpand(bboxFullList, groupBoxList[b]["bbox"])
+                bboxFullList = boxExpand(bboxFullList, groupBoxList[b]["bbox"])
 
             pairList.append({
                 "y": bboxKeyList[1],
@@ -8954,10 +8646,10 @@ class Module:
                 "section": "",
                 "group": "",
                 "sectionList": [],
-                "row": self._textClean(rowObject["text"]) if rowObject != None else "",
+                "row": categoryRemove(rowObject["text"], categoryBlankList) if rowObject != None else "",
                 "key": self._spaceNormalize(textKey),
                 "formula": "",
-                "value": " / ".join(textOptionList),
+                "value": separatorOption.join(textOptionList),
                 "isOptionLine": True,
                 "isSelfField": True
             })
@@ -8973,13 +8665,7 @@ class Module:
         return {"itemList": self._restRemove(itemList, usedList) + addList, "circleList": circleRestList, "pairList": pairList}
 
     def _optionListBuild(self, circleList, itemList, lineObject, height, blockList):
-        boxList = []
-
-        for a in range(len(circleList)):
-            if circleList[a].get("isBox"):
-                boxList.append(circleList[a])
-
-        boxList.sort(key=lambda boxObject: (boxObject["bbox"][1], boxObject["bbox"][0]))
+        boxList = self._boxSortedList(circleList)
 
         wallList = []
 
@@ -9133,14 +8819,14 @@ class Module:
         for a in range(len(optionList)):
             optionObject = optionList[a]
 
-            textOption = self.textMark if optionObject["box"].get("isMark") else self.textOption
+            textOption = textOptionMark if optionObject["box"].get("isMark") else textOptionEmpty
 
             bboxList = list(optionObject["box"]["bbox"])
 
             for b in range(len(optionObject["labelList"])):
                 textOption = self._textAppend(textOption, optionObject["labelList"][b]["text"])
 
-                bboxList = self._bboxExpand(bboxList, optionObject["labelList"][b]["bbox"])
+                bboxList = boxExpand(bboxList, optionObject["labelList"][b]["bbox"])
 
             optionObject["text"] = textOption
             optionObject["bbox"] = bboxList
@@ -9172,7 +8858,7 @@ class Module:
                 indexGroup = len(groupList) - 1
 
             groupList[indexGroup]["optionList"].append(optionObject)
-            groupList[indexGroup]["bbox"] = self._bboxExpand(groupList[indexGroup]["bbox"], bboxList)
+            groupList[indexGroup]["bbox"] = boxExpand(groupList[indexGroup]["bbox"], bboxList)
 
         boxUsedList = []
 
@@ -9190,7 +8876,7 @@ class Module:
             memberList.sort(key=lambda optionObject: optionObject["bbox"][0])
 
             if isRow:
-                blockList.append({"bbox": groupList[a]["bbox"], "text": " / ".join([optionObject["text"] for optionObject in memberList])})
+                blockList.append({"bbox": groupList[a]["bbox"], "text": separatorOption.join([optionObject["text"] for optionObject in memberList])})
 
                 continue
 
@@ -9208,7 +8894,7 @@ class Module:
                 columnList[b].sort(key=lambda optionObject: optionObject["bbox"][1])
 
                 for c in range(len(columnList[b])):
-                    lineList.append(f"- {columnList[b][c]['text']}")
+                    lineList.append(f"{textBullet}{columnList[b][c]['text']}")
 
             blockList.append({"bbox": groupList[a]["bbox"], "text": "", "lineList": lineList})
 
@@ -9367,7 +9053,7 @@ class Module:
         textOptionList = []
 
         for a in range(len(optionList)):
-            textOption = self.textMark if optionList[a]["box"].get("isMark") else self.textOption
+            textOption = textOptionMark if optionList[a]["box"].get("isMark") else textOptionEmpty
 
             if optionList[a]["marker"] != None:
                 textOption = f"{self._markerText(optionList[a]['marker']['text'])} {textOption}"
@@ -9377,7 +9063,7 @@ class Module:
 
             textOptionList.append(textOption)
 
-        return self._textAppend(self._matrixLineText(self._restRemove(itemList, usedList)), " / ".join(textOptionList))
+        return self._textAppend(self._matrixLineText(self._restRemove(itemList, usedList)), separatorOption.join(textOptionList))
 
     def _matrixEdgeList(self, positionList, margin):
         resultList = []
@@ -9472,8 +9158,10 @@ class Module:
             for b in range(len(itemList)):
                 bboxList = itemList[b]["bbox"]
 
-                indexRow = self._matrixIndex(rowEdgeList, (bboxList[1] + bboxList[3]) / 2)
-                indexColumn = self._matrixIndex(columnEdgeList, (bboxList[0] + bboxList[2]) / 2)
+                indexList = self._matrixCellIndex(rowEdgeList, bboxList, columnEdgeList)
+
+                indexRow = indexList[0]
+                indexColumn = indexList[1]
 
                 if indexRow < 0 or indexColumn < 0:
                     continue
@@ -9490,8 +9178,10 @@ class Module:
             for b in range(len(circleList)):
                 bboxList = circleList[b]["bbox"]
 
-                indexRow = self._matrixIndex(rowEdgeList, (bboxList[1] + bboxList[3]) / 2)
-                indexColumn = self._matrixIndex(columnEdgeList, (bboxList[0] + bboxList[2]) / 2)
+                indexList = self._matrixCellIndex(rowEdgeList, bboxList, columnEdgeList)
+
+                indexRow = indexList[0]
+                indexColumn = indexList[1]
 
                 if indexRow < 0 or indexColumn < 0:
                     continue
@@ -9525,7 +9215,7 @@ class Module:
                 cellList = []
 
                 for c in range(countColumn):
-                    cellList.append(self._cellEscape(self._matrixCellText(cellBoxList[b][c], cellItemList[b][c], height)))
+                    cellList.append(self._cellSeparatorEscape(self._matrixCellText(cellBoxList[b][c], cellItemList[b][c], height)))
 
                 if b == 0:
                     cellList[0] = "key"
@@ -9565,7 +9255,7 @@ class Module:
                 for b in range(len(itemList)):
                     gap = bboxList[0] - itemList[b]["bbox"][2]
 
-                    if itemList[b] is not itemList[a] and gap >= 0 and gap <= height * self.levelKeyGap and self._lineSameCheck(itemList[b]["bbox"], bboxList) and self._lineSameCheck(itemList[b]["bbox"], labelObject["bbox"]) == False and self._rowIdCheck(self._textClean(itemList[b]["text"])):
+                    if itemList[b] is not itemList[a] and gap >= 0 and gap <= height * self.levelKeyGap and self._lineSameCheck(itemList[b]["bbox"], bboxList) and self._lineSameCheck(itemList[b]["bbox"], labelObject["bbox"]) == False and self._rowIdCheck(categoryRemove(itemList[b]["text"], categoryBlankList)):
                         isField = True
 
                 if isField:
@@ -9692,12 +9382,12 @@ class Module:
             isComb = len(memberList) > 1
 
             for a in range(len(memberList)):
-                bboxList = self._bboxExpand(bboxList, memberList[a]["bbox"])
+                bboxList = boxExpand(bboxList, memberList[a]["bbox"])
 
-                if len(self._textClean(memberList[a]["text"])) != 1:
+                if len(categoryRemove(memberList[a]["text"], categoryBlankList)) != 1:
                     isComb = False
 
-            fieldList.append({"text": "".join([self._textClean(itemObject["text"]) for itemObject in sorted(memberList, key=lambda itemObject: itemObject["bbox"][0])]) if isComb else self._matrixLineText(memberList), "bbox": bboxList, "itemList": memberList, "isComb": isComb})
+            fieldList.append({"text": "".join([categoryRemove(itemObject["text"], categoryBlankList) for itemObject in sorted(memberList, key=lambda itemObject: itemObject["bbox"][0])]) if isComb else self._matrixLineText(memberList), "bbox": bboxList, "itemList": memberList, "isComb": isComb})
 
         usedList = []
 
@@ -9756,7 +9446,7 @@ class Module:
 
                     gap = labelObject["bbox"][0] - bboxItemList[2]
 
-                    if itemList[b] not in labelList and itemList[b] not in usedList and itemList[b].get("fieldIndex", 0) == 0 and self._lineSameCheck(bboxItemList, labelObject["bbox"]) and gap >= 0 and gap <= height * self.levelKeyGap and self._markerCheck(self._textClean(itemList[b]["text"])):
+                    if itemList[b] not in labelList and itemList[b] not in usedList and itemList[b].get("fieldIndex", 0) == 0 and self._lineSameCheck(bboxItemList, labelObject["bbox"]) and gap >= 0 and gap <= height * self.levelKeyGap and self._markerCheck(categoryRemove(itemList[b]["text"], categoryBlankList)):
                         rowObject = itemList[b]
 
             cell = self._cellFind(bboxList, {"verticalList": wallList, "horizontalList": ruleList})
@@ -9800,7 +9490,7 @@ class Module:
             isLabel = len(labelList) > 0
 
             for b in range(len(labelList)):
-                if labelList[b].get("isRowBox") or self._rowIdCheck(self._textClean(labelList[b]["text"])) or labelList[b].get("isOptionLine"):
+                if labelList[b].get("isRowBox") or self._rowIdCheck(categoryRemove(labelList[b]["text"], categoryBlankList)) or labelList[b].get("isOptionLine"):
                     isLabel = False
 
             if isLabel == False:
@@ -9809,9 +9499,9 @@ class Module:
             bboxKeyList = list(labelList[0]["bbox"])
 
             for b in range(len(labelList)):
-                bboxKeyList = self._bboxExpand(bboxKeyList, labelList[b]["bbox"])
+                bboxKeyList = boxExpand(bboxKeyList, labelList[b]["bbox"])
 
-            pairList.append({"y": bboxKeyList[1], "bbox": bboxKeyList, "bboxKey": bboxKeyList, "bboxFull": self._bboxExpand(bboxKeyList, bboxList), "section": "", "group": "", "sectionList": [], "row": self._textClean(rowObject["text"]) if rowObject != None else "", "key": self._spaceNormalize(self._matrixLineText(labelList)), "formula": "", "value": fieldList[a]["text"], "isSelfField": True})
+            pairList.append({"y": bboxKeyList[1], "bbox": bboxKeyList, "bboxKey": bboxKeyList, "bboxFull": boxExpand(bboxKeyList, bboxList), "section": "", "group": "", "sectionList": [], "row": categoryRemove(rowObject["text"], categoryBlankList) if rowObject != None else "", "key": self._spaceNormalize(self._matrixLineText(labelList)), "formula": "", "value": fieldList[a]["text"], "isSelfField": True})
 
             usedList = usedList + labelList + fieldList[a]["itemList"]
 
@@ -9822,7 +9512,7 @@ class Module:
 
     def _restWrite(self, restObject, lineList):
         if "lineList" not in restObject:
-            lineList.append(f"- {restObject['text']}")
+            lineList.append(f"{textBullet}{restObject['text']}")
 
             return
 
@@ -10037,7 +9727,7 @@ class Module:
         bboxIdList = []
 
         for a in range(len(itemPageList)):
-            if itemPageList[a].get("fieldIndex", 0) == 0 and self._rowIdCheck(self._textClean(itemPageList[a]["text"])):
+            if itemPageList[a].get("fieldIndex", 0) == 0 and self._rowIdCheck(categoryRemove(itemPageList[a]["text"], categoryBlankList)):
                 bboxIdList.append(itemPageList[a]["bbox"])
 
         matrixList = []
@@ -10137,7 +9827,7 @@ class Module:
         for a in range(len(itemList)):
             if itemList[a].get("isRowBox"):
                 itemList[a]["type"] = "row"
-                itemList[a]["text"] = self._textClean(itemList[a]["text"])
+                itemList[a]["text"] = categoryRemove(itemList[a]["text"], categoryBlankList)
 
         self._valueFilter(itemList)
 
@@ -10380,7 +10070,7 @@ class Module:
         if len(bandTitleList) > 0:
             return "\n".join(self._bandWrite(pairList, restList, bandTitleList, height))
 
-        return "\n".join(self._tableWrite(pairList, restList))
+        return "\n".join(self._tablePairWrite(pairList, restList))
 
     def itemPdfBuild(self, elementList, scale, numberPage):
         textList = []
@@ -10412,14 +10102,6 @@ class Module:
             itemList.append({"text": elementObject["text"], "bbox": [elementObject["x0"] * scale, elementObject["y0"] * scale, elementObject["x1"] * scale, elementObject["y1"] * scale], "isVertical": elementObject["isVertical"], "charList": charList, "page": numberPage, "font": font, "style": f"{font}|{elementObject['fontSize']}", "fieldIndex": elementObject.get("fieldIndex", 0)})
 
         return itemList
-
-    def _detectionBboxList(self, detectionList):
-        resultList = []
-
-        for a in range(len(detectionList)):
-            resultList.append(boxFromPointList(detectionList[a]["coordinate"]))
-
-        return resultList
 
     def _gridOverlap(self, cellList):
         slotObject = {}
@@ -10499,7 +10181,7 @@ class Module:
 
             areaTable += area
 
-            bboxContentList = list(coordinateList[0:4]) if bboxContentList == None else self._bboxExpand(bboxContentList, coordinateList)
+            bboxContentList = list(coordinateList[0:4]) if bboxContentList == None else boxExpand(bboxContentList, coordinateList)
 
             if area > areaLargest:
                 areaLargest = area
@@ -10516,7 +10198,7 @@ class Module:
 
             areaText += area
 
-            bboxContentList = self._bboxExpand(bboxContentList, bboxList[a])
+            bboxContentList = boxExpand(bboxContentList, bboxList[a])
 
             for b in range(len(tablePageList)):
                 if boxCenterInsideCheck(bboxList[a], tablePageList[b]["coordinate"]):
@@ -10535,17 +10217,17 @@ class Module:
         return self._gridOverlap(tableLargest["cellList"]) >= self.levelModuleOverlap
 
     def pdfParse(self, pathInput, password):
-        return PdfChar().execute(pathInput, password)
+        return pdf.Pdf(True).execute(pathInput, password)
 
     def _narrowCheck(self, character):
-        return unicodedata.east_asian_width(character) not in ["W", "F"] and unicodedata.category(character)[0] in ["N", "L"]
+        return wideCheck(character) == False and unicodedata.category(character)[0] in ["N", "L"]
 
     def _emBoxBuild(self, itemList):
         for a in range(len(itemList)):
             if itemList[a]["isVertical"]:
                 continue
 
-            text = self._textClean(itemList[a]["text"])
+            text = categoryRemove(itemList[a]["text"], categoryBlankList)
 
             if len(text) == 0:
                 continue
@@ -10568,7 +10250,7 @@ class Module:
                 itemList[a]["bbox"] = [bboxList[0], bboxList[1] - size * self.levelEmWideTop, bboxList[2], bboxList[3] + size * self.levelEmWideBottom]
 
     def circleBuild(self, detectionList, elementList, scale):
-        height = self._heightBoxMedian(self._detectionBboxList(detectionList))
+        height = boxSizeMedian(detectionBoxBuild(detectionList))
 
         resultList = []
 
@@ -10589,7 +10271,7 @@ class Module:
             isDuplicate = False
 
             for b in range(len(resultList)):
-                if self._iou(resultList[b]["bbox"], bboxList) >= self.levelDuplicate:
+                if boxIou(resultList[b]["bbox"], bboxList) >= self.levelDuplicate:
                     isDuplicate = True
 
                     break
@@ -10637,7 +10319,7 @@ class Module:
             for b in range(len(squareList)):
                 bboxOtherList = squareList[b]
 
-                if b == a or self._iou(bboxList, bboxOtherList) >= self.levelDuplicate:
+                if b == a or boxIou(bboxList, bboxOtherList) >= self.levelDuplicate:
                     continue
 
                 if self._overlap(bboxList[1], bboxList[3], bboxOtherList[1], bboxOtherList[3]) > 0 and bboxOtherList[0] < bboxList[2] + size * self.levelOptionBoxGap and bboxOtherList[2] > bboxList[0] - size * self.levelOptionBoxGap:
@@ -10653,7 +10335,7 @@ class Module:
             isSwatch = False
 
             for b in range(len(inkList)):
-                if self._iou(inkList[b], bboxList) >= self.levelDuplicate:
+                if boxIou(inkList[b], bboxList) >= self.levelDuplicate:
                     isSwatch = True
 
                     break
@@ -10673,7 +10355,7 @@ class Module:
             isDuplicate = False
 
             for b in range(len(resultList)):
-                if self._iou(resultList[b]["bbox"], bboxList) >= self.levelDuplicate:
+                if boxIou(resultList[b]["bbox"], bboxList) >= self.levelDuplicate:
                     isDuplicate = True
 
             if isDuplicate == False:
@@ -10699,22 +10381,14 @@ class Module:
                 if self._overlap(bboxList[1], bboxList[3], bboxItemList[1], bboxItemList[3]) <= 0:
                     continue
 
-                gap = bboxItemList[0] - bboxList[2]
+                gapObject = self._optionGapFind(bboxItemList, bboxList, size)
 
-                if gap < -size * self.levelOptionBoxGap:
-                    gap = bboxList[0] - bboxItemList[2]
-
-                    if gap < -size * self.levelOptionBoxGap:
-                        continue
-
-                    gap += size * self.levelOptionBoxLabel
-
-                if gap > size * self.levelOptionBoxLabel * 2:
+                if gapObject == None:
                     continue
 
-                if itemBest == None or gap < gapBest:
+                if itemBest == None or gapObject["gap"] < gapBest:
                     itemBest = itemList[b]
-                    gapBest = gap
+                    gapBest = gapObject["gap"]
 
             if itemBest != None:
                 itemBest["isOption"] = True
@@ -10755,22 +10429,14 @@ class Module:
                 if self._lineSameCheck(bboxList, bboxItemList) == False:
                     continue
 
-                gap = bboxItemList[0] - bboxList[2]
+                gapObject = self._optionGapFind(bboxItemList, bboxList, size)
 
-                isItemRight = True
-
-                if gap < -size * self.levelOptionBoxGap:
-                    gap = bboxList[0] - bboxItemList[2]
-
-                    if gap < -size * self.levelOptionBoxGap:
-                        continue
-
-                    gap += size * self.levelOptionBoxLabel
-
-                    isItemRight = False
-
-                if gap > size * self.levelOptionBoxLabel * 2:
+                if gapObject == None:
                     continue
+
+                gap = gapObject["gap"]
+
+                isItemRight = gapObject["isRight"]
 
                 if itemBest == None or gap < gapBest:
                     itemBest = itemList[b]
@@ -10781,17 +10447,17 @@ class Module:
             if itemBest == None:
                 continue
 
-            textOption = self.textMark if boxList[a]["isMark"] else self.textOption
+            textOption = textOptionMark if boxList[a]["isMark"] else textOptionEmpty
 
             itemBest["text"] = f"{textOption} {itemBest['text']}" if isRight else f"{itemBest['text']} {textOption}"
 
         return self._restRemove(itemList, removeList)
 
     def ringBuild(self, image, detectionList):
-        return self._ringCollect(image, self._heightBoxMedian(self._detectionBboxList(detectionList)))
+        return self._ringCollect(image, boxSizeMedian(detectionBoxBuild(detectionList)))
 
     def lineBuild(self, image, detectionList):
-        return self._lineCollect(image, self._heightBoxMedian(self._detectionBboxList(detectionList)))
+        return self._lineCollect(image, boxSizeMedian(detectionBoxBuild(detectionList)))
 
     def _overlapTrim(self, bboxList, bboxDetectionList):
         resultList = list(bboxList)
@@ -10915,9 +10581,9 @@ class Module:
         return resultList
 
     def itemImageBuild(self, detectionList, image, recognition, watermarkObject, numberPage):
-        bboxDetectionList = self._detectionBboxList(detectionList)
+        bboxDetectionList = detectionBoxBuild(detectionList)
 
-        height = self._heightBoxMedian(bboxDetectionList)
+        height = boxSizeMedian(bboxDetectionList)
 
         lineObject = self._lineCollect(image, height)
 
@@ -10945,7 +10611,7 @@ class Module:
                 if watermarkObject["isKeepList"][a]:
                     bboxContextList.append(bboxDetectionList[a])
 
-            bboxZoneList = self._detectionBboxList(watermarkObject["detectionZoneList"])
+            bboxZoneList = detectionBoxBuild(watermarkObject["detectionZoneList"])
 
             imageZoneClean = self._dashErase(watermarkObject["image"], lineObject["dashList"])
 
@@ -10995,11 +10661,9 @@ class Module:
         self.levelModuleBoxSize = 3.0
         self.levelModuleBoxSquare = 0.2
         self.levelLineExtend = 0.5
-        self.levelLineDouble = 1.7
         self.levelLineMiddle = 0.3
         self.levelLineValley = 0.4
         self.levelContain = 0.9
-        self.levelRuleLength = 1.5
         self.levelRuleLengthHorizontal = 1.2
         self.levelRuleThick = 0.25
         self.levelRuleAspect = 20
@@ -11043,7 +10707,7 @@ class Module:
         self.levelUnitAbove = 1.0
         self.levelUnitBelow = 3.0
         self.levelUnitPrefix = 2.0
-        self.levelColumnOverlap = 0.3
+        self.levelColumnItemOverlap = 0.3
         self.levelLetterMinimum = 0.5
         self.levelLetterGap = 4.0
         self.levelTitleOverlap = 0.8
@@ -11073,7 +10737,7 @@ class Module:
         self.countUnitMaximum = 2
         self.levelUnitAlign = 1.0
         self.levelHeaderGap = 2.0
-        self.countHeaderRow = 0
+        self.countHeaderMember = 0
         self.levelUnitSize = 0.75
         self.levelUnitIsolate = 0.6
         self.levelStrikeBand = 0.25
@@ -11086,8 +10750,6 @@ class Module:
         self.levelOptionLineGap = 0.5
         self.levelCellBelow = 1.5
         self.countLineSplit = 4
-        self.textMark = "[x]"
-        self.textOption = "[ ]"
         self.countRowMinimum = 3
         self.countRowDigit = 3
         self.countRowMissing = 1
@@ -11119,7 +10781,7 @@ class Module:
         self.levelBandSame = 0.5
         self.levelLabelPitch = 1.1
         self.levelLabelEmpty = 3.0
-        self.countRowColumn = 3
+        self.countColumnItem = 3
         self.countAttachKey = 3
         self.levelCellLeftProbe = 0.3
         self.levelSeparatorGap = 2.0

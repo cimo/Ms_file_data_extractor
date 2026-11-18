@@ -7,7 +7,7 @@ import numpy
 sys.dont_write_bytecode = True
 
 # Source
-from helper import onnxSessionBuild, detrDetect, centerPointCalculate, boxArea, boxIntersection, boxIou, boxContainedRemove, rangeOverlapRatio, mediaImageWrite
+from helper import onnxSessionBuild, detrDetect, centerPointCalculate, boxArea, boxIntersection, boxIou, boxContainedRemove, rangeOverlapRatio, mediaImageWrite, levelBoxContained, levelBoxNms, levelVerticalRatio, levelColumnOverlap, columnGroupAppend, sizeDominantCalculate, boxCenterInsideCheck, levelTitleSize
 
 class Layout:
     def _detect(self, image):
@@ -34,7 +34,7 @@ class Layout:
                 "columnX1": 0
             })
 
-        return boxContainedRemove(self._boxSuppression(resultList), "bbox", self.levelBoxContained)
+        return boxContainedRemove(self._boxSuppression(resultList), "bbox")
 
     def _boxSuppression(self, boxList):
         resultList = []
@@ -52,8 +52,8 @@ class Layout:
                 if areaIntersection == 0:
                     continue
 
-                isSameRegion = boxIou(boxSortedList[a]["bbox"], resultList[b]["bbox"]) >= self.levelBoxNms
-                isInside = areaIntersection / float(min(area, boxArea(resultList[b]["bbox"]))) >= self.levelBoxContained
+                isSameRegion = boxIou(boxSortedList[a]["bbox"], resultList[b]["bbox"]) >= levelBoxNms
+                isInside = areaIntersection / float(min(area, boxArea(resultList[b]["bbox"]))) >= levelBoxContained
                 isSameGroup = self._labelGroupGet(boxSortedList[a]["label"]) == self._labelGroupGet(resultList[b]["label"])
 
                 if isSameRegion or (isInside and isSameGroup):
@@ -81,7 +81,7 @@ class Layout:
         for a in range(len(itemList)):
             bboxList = itemList[a]["bbox"]
 
-            if bboxList[3] - bboxList[1] >= (bboxList[2] - bboxList[0]) * self.levelVerticalRatio:
+            if bboxList[3] - bboxList[1] >= (bboxList[2] - bboxList[0]) * levelVerticalRatio:
                 countVertical += 1
             else:
                 countHorizontal += 1
@@ -107,7 +107,100 @@ class Layout:
 
         return bboxList
 
-    def _itemOrder(self, itemList, imageWidth, imageHeight):
+    def _ruleSideFind(self, itemObject, position):
+        bboxList = itemObject["bboxOrder"]
+
+        margin = (bboxList[3] - bboxList[1]) * self.levelRuleCross
+
+        if bboxList[3] - margin <= position:
+            return -1
+
+        if bboxList[1] + margin >= position:
+            return 1
+
+        return 0
+
+    def _ruleSplitCheck(self, ruleList, itemObject, itemBandList):
+        for a in range(len(ruleList)):
+            isSplit = self._ruleSideFind(itemObject, ruleList[a]) == 1
+
+            for b in range(len(itemBandList)):
+                if self._ruleSideFind(itemBandList[b], ruleList[a]) != -1:
+                    isSplit = False
+
+            if isSplit:
+                return True
+
+        return False
+
+    def _bandSpanCheck(self, itemObject, itemList):
+        bboxList = itemObject["bboxOrder"]
+
+        overlapList = []
+
+        for a in range(len(itemList)):
+            bboxOtherList = itemList[a]["bboxOrder"]
+
+            if itemList[a] is not itemObject and bboxOtherList[0] < bboxList[2] and bboxOtherList[2] > bboxList[0]:
+                overlapList.append(bboxOtherList)
+
+        for a in range(len(overlapList)):
+            for b in range(len(overlapList)):
+                if overlapList[a][2] <= overlapList[b][0]:
+                    return True
+
+        return False
+
+    def _bandEdgeFind(self, itemList, isHead):
+        result = None
+
+        for a in range(len(itemList)):
+            if result == None or (isHead and itemList[a]["bboxOrder"][1] < result["bboxOrder"][1]) or (isHead == False and itemList[a]["bboxOrder"][3] > result["bboxOrder"][3]):
+                result = itemList[a]
+
+        for a in range(len(itemList)):
+            if itemList[a] is result:
+                continue
+
+            if (isHead and itemList[a]["bboxOrder"][1] < result["bboxOrder"][3]) or (isHead == False and itemList[a]["bboxOrder"][3] > result["bboxOrder"][1]):
+                return None
+
+        return result
+
+    def _bandEdgeSplit(self, itemList, isClosed):
+        headList = []
+        tailList = []
+
+        itemRestList = list(itemList)
+
+        isChange = True
+
+        while isChange and len(itemRestList) > self.countBandEdge:
+            isChange = False
+
+            itemHead = self._bandEdgeFind(itemRestList, True)
+
+            if itemHead != None and self._bandSpanCheck(itemHead, itemRestList):
+                headList.append(itemHead)
+
+                itemRestList.remove(itemHead)
+
+                isChange = True
+
+                continue
+
+            itemTail = self._bandEdgeFind(itemRestList, False)
+
+            if itemTail != None and (self._bandSpanCheck(itemTail, itemRestList) or (isClosed and itemTail["isTitle"])):
+                tailList.insert(0, itemTail)
+
+                itemRestList.remove(itemTail)
+
+                isChange = True
+
+        return {"headList": headList, "itemList": itemRestList, "tailList": tailList}
+
+    def _itemOrder(self, itemList, ruleList, heightLine, imageWidth, imageHeight):
         itemHeaderList = []
         itemFooterList = []
         itemBodyList = []
@@ -129,24 +222,41 @@ class Layout:
         for a in range(len(itemSortedList)):
             bboxList = itemSortedList[a]["bboxOrder"]
 
-            if (bboxList[2] - bboxList[0]) / float(imageWidth) < self.levelFullWidth:
+            isFull = (bboxList[2] - bboxList[0]) / float(imageWidth) >= self.levelFullWidth
+
+            edgeBand = 0
+
+            for b in range(len(itemBandList)):
+                edgeBand = max(edgeBand, itemBandList[b]["bboxOrder"][3])
+
+            if self._ruleSplitCheck(ruleList, itemSortedList[a], itemBandList) or (len(itemBandList) > 0 and heightLine > 0 and bboxList[1] - edgeBand >= heightLine * self.levelBandGap):
+                resultList = resultList + self._bandOrder(itemBandList, isFull, imageHeight)
+
+                itemBandList = []
+
+            if isFull == False:
                 itemBandList.append(itemSortedList[a])
 
                 continue
 
-            resultList = resultList + self._bandOrder(itemBandList, imageHeight)
+            resultList = resultList + self._bandOrder(itemBandList, True, imageHeight)
             resultList.append(itemSortedList[a])
 
             itemBandList = []
 
-        resultList = resultList + self._bandOrder(itemBandList, imageHeight)
+        resultList = resultList + self._bandOrder(itemBandList, False, imageHeight)
 
         return resultList + sorted(itemFooterList, key=lambda itemObject: itemObject["bboxOrder"][1])
 
-    def _bandOrder(self, itemList, imageHeight):
-        resultList = []
+    def _bandOrder(self, itemList, isClosed, imageHeight):
+        edgeObject = self._bandEdgeSplit(itemList, isClosed)
+
+        itemList = edgeObject["itemList"]
+
+        resultList = list(edgeObject["headList"])
 
         columnList = self._columnGroup(itemList)
+
 
         y1Band = imageHeight
         y2Band = 0
@@ -177,7 +287,7 @@ class Layout:
 
                 resultList.append(itemColumnList[b])
 
-        return resultList
+        return resultList + edgeObject["tailList"]
 
     def _columnLocalOrder(self, itemList):
         itemSortedList = sorted(itemList, key=lambda itemObject: itemObject["bboxOrder"][1])
@@ -231,23 +341,15 @@ class Layout:
         for a in range(len(itemSortedList)):
             bboxList = itemSortedList[a]["bboxOrder"]
 
-            isAdded = False
+            index = -1
 
             for b in range(len(resultList)):
-                if rangeOverlapRatio(bboxList[0], bboxList[2], resultList[b]["x1"], resultList[b]["x2"]) < self.levelColumnOverlap:
-                    continue
+                if rangeOverlapRatio(bboxList[0], bboxList[2], resultList[b]["x1"], resultList[b]["x2"]) >= levelColumnOverlap:
+                    index = b
 
-                resultList[b]["x1"] = min(resultList[b]["x1"], bboxList[0])
-                resultList[b]["x2"] = max(resultList[b]["x2"], bboxList[2])
+                    break
 
-                resultList[b]["itemList"].append(itemSortedList[a])
-
-                isAdded = True
-
-                break
-
-            if isAdded == False:
-                resultList.append({"x1": bboxList[0], "x2": bboxList[2], "itemList": [itemSortedList[a]]})
+            columnGroupAppend(resultList, index, bboxList, itemSortedList[a])
 
         return sorted(resultList, key=lambda columnObject: columnObject["x1"])
 
@@ -375,22 +477,59 @@ class Layout:
 
         return False
 
-    def itemOrder(self, astPage, itemPageList):
+    def _titleCheck(self, itemObject, itemPageList, sizeBody):
+        if itemObject["label"] in self.labelTitleList:
+            return True
+
+        itemInsideList = []
+
+        for a in range(len(itemPageList)):
+            if boxCenterInsideCheck(itemPageList[a]["bbox"], itemObject["bbox"]):
+                itemInsideList.append(itemPageList[a])
+
+        size = sizeDominantCalculate(itemInsideList)
+
+        if itemObject["label"] not in self.labelTextList or sizeBody == 0 or size < sizeBody * levelTitleSize:
+            return False
+
+        for a in range(len(itemInsideList)):
+            if boxCenterInsideCheck(itemInsideList[a]["bbox"], [itemObject["bbox"][0], itemInsideList[0]["bbox"][1], itemObject["bbox"][2], itemInsideList[0]["bbox"][3]]) == False:
+                return False
+
+        return True
+
+    def itemOrder(self, astPage, itemPageList, ruleList):
         directionObject = self._directionDetect(itemPageList)
 
         itemList = astPage["itemList"]
 
+        sizeBody = sizeDominantCalculate(itemPageList)
+
+        heightList = sorted([itemObject["bbox"][3] - itemObject["bbox"][1] for itemObject in itemPageList])
+
+        heightLine = heightList[len(heightList) // 2] if len(heightList) > 0 else 0
+
         for a in range(len(itemList)):
             itemList[a]["bboxOrder"] = self._bboxProject(itemList[a]["bbox"], astPage["width"], directionObject)
+            itemList[a]["isTitle"] = self._titleCheck(itemList[a], itemPageList, sizeBody)
 
         imageWidth = astPage["height"] if directionObject["isVertical"] else astPage["width"]
         imageHeight = astPage["width"] if directionObject["isVertical"] else astPage["height"]
 
+        rulePositionList = []
+
+        for a in range(len(ruleList)):
+            bboxList = self._bboxProject(ruleList[a], astPage["width"], directionObject)
+
+            if bboxList[3] - bboxList[1] == 0 and (bboxList[2] - bboxList[0]) / float(imageWidth) >= self.levelFullWidth:
+                rulePositionList.append(bboxList[1])
+
         astPage["direction"] = directionObject
-        astPage["itemList"] = self._itemOrder(itemList, imageWidth, imageHeight)
+        astPage["itemList"] = self._itemOrder(itemList, rulePositionList, heightLine, imageWidth, imageHeight)
 
         for a in range(len(astPage["itemList"])):
             del astPage["itemList"][a]["bboxOrder"]
+            del astPage["itemList"][a]["isTitle"]
 
     def mediaWrite(self, astPage, image, pathOutput):
         itemList = astPage["itemList"]
@@ -440,7 +579,7 @@ class Layout:
 
             del astPageList[a]["itemList"]
 
-    def resultBuild(self, astPage, countStart):
+    def resultLayoutBuild(self, astPage, countStart):
         resultList = []
 
         flowObject = {"main": astPage["itemMainList"], "secondary": astPage["itemSecondaryList"]}
@@ -491,16 +630,16 @@ class Layout:
 
         self.imageSizeLayout = 800
 
-        self.levelBoxContained = 0.9
-        self.levelBoxNms = 0.5
         self.levelBandAside = 0.5
-        self.levelVerticalRatio = 2.0
         self.levelColumnDocument = 0.25
         self.levelColumnFlow = 0.5
         self.levelColumnTolerance = 0.02
-        self.levelColumnOverlap = 0.5
         self.levelFigureGap = 2.0
         self.levelFullWidth = 0.7
+        self.levelRuleCross = 0.1
+        self.levelBandGap = 3.0
+
+        self.countBandEdge = 2
         self.levelDebugOpacity = 0.2
 
         self.scoreThreshold = 0.3
@@ -564,6 +703,8 @@ class Layout:
         }
 
         self.labelContainerList = ["table", "image", "chart"]
+        self.labelTitleList = ["doc_title", "paragraph_title"]
+        self.labelTextList = ["text", "figure_title"]
         self.labelFlowList = ["doc_title", "paragraph_title", "text", "abstract", "content", "reference", "reference_content"]
         self.labelFigureList = ["image", "chart"]
         self.labelFigureTitleList = ["figure_title"]

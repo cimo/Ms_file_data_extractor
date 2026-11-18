@@ -5,7 +5,7 @@ sys.dont_write_bytecode = True
 # Source
 import detection
 import recognition
-from helper import boxFromPointList, centerPointCalculate, imageInkBuild, boxDebugWrite
+from helper import boxFromPointList, centerPointCalculate, imageInkBuild, boxDebugWrite, levelVerticalRatio
 
 class Ocr:
     def _verticalCheck(self, detectionList):
@@ -15,7 +15,7 @@ class Ocr:
         for a in range(len(detectionList)):
             coordinateList = boxFromPointList(detectionList[a]["coordinate"])
 
-            if coordinateList[3] - coordinateList[1] >= (coordinateList[2] - coordinateList[0]) * self.levelVerticalRatio:
+            if coordinateList[3] - coordinateList[1] >= (coordinateList[2] - coordinateList[0]) * levelVerticalRatio:
                 countVertical += 1
             else:
                 countHorizontal += 1
@@ -86,7 +86,7 @@ class Ocr:
         else:
             ratioList = imageInk[cross0:cross1, flow0:flow1].sum(axis=0) / float(size)
 
-        gapMinimum = size * self.levelSplitGap
+        gapMinimum = size * self.levelSplitBoxGap
         gapCount = 0
 
         for a in range(len(ratioList)):
@@ -215,11 +215,9 @@ class Ocr:
     def __init__(self, isDebug):
         self.isDebug = isDebug
 
-        self.levelVerticalRatio = 2.0
-
         self.levelSplitMargin = 0.5
         self.levelSplitLine = 0.8
-        self.levelSplitGap = 0.4
+        self.levelSplitBoxGap = 0.4
 
         self.detection = detection.Detection()
         self.recognition = recognition.Recognition()

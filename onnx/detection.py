@@ -103,7 +103,7 @@ class Detection:
 
         tensor = tensorNormalize(imageResized, self.meanList, self.standardList)
 
-        tensorOutputList = self.onnxSession.run(None, {"x": tensor})
+        tensorOutputList = self.onnxSessionDetection.run(None, {"x": tensor})
 
         probabilityMap = tensorOutputList[0][0][0]
         bitmap = (probabilityMap > self.binaryThreshold).astype(numpy.uint8)
@@ -145,7 +145,7 @@ class Detection:
         return self._boxSort(resultList)
 
     def __init__(self):
-        self.pathModel = f"{os.path.dirname(__file__)}/model/pp-ocrV6_medium_det.onnx"
+        self.pathModelDetection = f"{os.path.dirname(__file__)}/model/pp-ocrV6_medium_det.onnx"
 
         self.limitSideLength = 2000
         self.limitSideLengthMax = 4000
@@ -158,4 +158,4 @@ class Detection:
         self.meanList = numpy.array([0.485, 0.456, 0.406], dtype=numpy.float32)
         self.standardList = numpy.array([0.229, 0.224, 0.225], dtype=numpy.float32)
 
-        self.onnxSession = onnxSessionBuild(self.pathModel)
+        self.onnxSessionDetection = onnxSessionBuild(self.pathModelDetection)

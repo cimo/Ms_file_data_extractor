@@ -1,6 +1,9 @@
 import unicodedata
 import icu
 
+# Source
+from helper import categoryContainCheck, categoryCasedList
+
 class Reference:
     def _currencyBuild(self):
         resultList = []
@@ -28,7 +31,7 @@ class Reference:
             if len(code) == 3 and code not in resultList:
                 resultList.append(code)
 
-            if len(symbol) > 0 and symbol not in resultList and (len(symbol) > 1 or self._casedCheck(symbol) == False):
+            if len(symbol) > 0 and symbol not in resultList and (len(symbol) > 1 or categoryContainCheck(symbol, categoryCasedList) == False):
                 resultList.append(symbol)
 
             textName = ""
@@ -102,13 +105,6 @@ class Reference:
 
         return resultList
 
-    def _casedCheck(self, text):
-        for a in range(len(text)):
-            if unicodedata.category(text[a]) in ["Lu", "Ll", "Lt"]:
-                return True
-
-        return False
-
     def _joinCheck(self, word, tokenList):
         reachList = [True]
 
@@ -120,7 +116,7 @@ class Reference:
                 continue
 
             for b in range(len(tokenList)):
-                if self._casedCheck(tokenList[b]) == False and word.startswith(tokenList[b], a):
+                if categoryContainCheck(tokenList[b], categoryCasedList) == False and word.startswith(tokenList[b], a):
                     reachList[a + len(tokenList[b])] = True
 
         return reachList[len(word)]
@@ -225,7 +221,7 @@ class Reference:
 
         return len(wordList) > 0
 
-    def sentenceEndCheck(self, text):
+    def sentenceTerminalCheck(self, text):
         text = text.strip()
 
         return len(text) > 0 and icu.Char.hasBinaryProperty(text[len(text) - 1], icu.UProperty.S_TERM)

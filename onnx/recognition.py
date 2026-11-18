@@ -147,7 +147,7 @@ class Recognition:
 
                 tensorBatch[b, :, :, 0:tensor.shape[2]] = tensor
 
-            tensorOutputList = self.onnxSession.run(None, {"x": tensorBatch})
+            tensorOutputList = self.onnxSessionRecognition.run(None, {"x": tensorBatch})
 
             for b in range(len(groupList)):
                 resultList[groupList[b]] = self._textDecode(tensorOutputList[0][b], widthMax / float(tensorOutputList[0][b].shape[0]) / widthResizedList[b])
@@ -155,7 +155,7 @@ class Recognition:
         return resultList
 
     def __init__(self):
-        self.pathModel = f"{os.path.dirname(__file__)}/model/pp-ocrV6_medium_rec.onnx"
+        self.pathModelRecognition = f"{os.path.dirname(__file__)}/model/pp-ocrV6_medium_rec.onnx"
         self.pathDictionary = f"{os.path.dirname(__file__)}/model/dictionary.txt"
 
         self.imageHeightModel = 48
@@ -176,4 +176,4 @@ class Recognition:
 
         self.characterList.append(" ")
 
-        self.onnxSession = onnxSessionBuild(self.pathModel)
+        self.onnxSessionRecognition = onnxSessionBuild(self.pathModelRecognition)

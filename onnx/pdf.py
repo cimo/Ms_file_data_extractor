@@ -7,12 +7,13 @@ import base64
 import codecs
 import hashlib
 import re
+import unicodedata
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 sys.dont_write_bytecode = True
 
 # Source
-from helper import spacelessCheck, whitespaceCheck, boxFromPointList, characterNormalize, ideographPageResolve
+from helper import spacelessCheck, whitespaceCheck, boxFromPointList, characterNormalize, ideographPageResolve, gapMedianCalculate, spaceGapCheck, wideCheck
 
 def mergeText(elementList):
     resultList = []
@@ -57,6 +58,11 @@ def mergeText(elementList):
 
                 if spacelessCheck(previousText[-1:]) and spacelessCheck(elementText[0:1]):
                     isSpace = gap >= size * 0.25 and icu.Char.isalpha(previousText[-1:]) and icu.Char.isalpha(elementText[0:1])
+
+                if "fontPartList" not in current:
+                    current["fontPartList"] = [[current["fontName"], len(previousText)]]
+
+                current["fontPartList"].append([element["fontName"], len(elementText)])
 
                 current["text"] = f"{previousText} {elementText}" if isSpace else f"{previousText}{elementText}"
 
@@ -125,8 +131,8 @@ class Pdf:
         if filterNode is None or filterNode["kind"] != "name" or filterNode["value"] != "Standard":
             return self.messageEncryption
 
-        version = int(self._numberValue(entryObject.get("V")))
-        revision = int(self._numberValue(entryObject.get("R")))
+        version = int(self._nodeNumberValue(entryObject.get("V")))
+        revision = int(self._nodeNumberValue(entryObject.get("R")))
 
         if version not in self.versionEncryptList:
             return self.messageEncryption
@@ -203,9 +209,9 @@ class Pdf:
     def _keyStandard(self, password, revision, entryObject, ownerByteList, userByteList):
         idByteList = self._idByte()
 
-        permission = int(self._numberValue(entryObject.get("P")))
+        permission = int(self._nodeNumberValue(entryObject.get("P")))
 
-        countByte = 5 if revision == 2 else int(self._numberValue(entryObject.get("Length")) / 8)
+        countByte = 5 if revision == 2 else int(self._nodeNumberValue(entryObject.get("Length")) / 8)
 
         if countByte <= 0:
             countByte = 5
@@ -494,7 +500,7 @@ class Pdf:
             result = self._parseHexString()
         elif code == 91:
             result = self._parseArray()
-        elif self._digitCheck(code) or code == 43 or code == 45 or code == 46:
+        elif self._byteDigitCheck(code) or code == 43 or code == 45 or code == 46:
             result = self._parseNumberOrReference()
         elif self.text[self.position:self.position + 4] == "true":
             self.position += 4
@@ -999,7 +1005,7 @@ class Pdf:
 
         return {"kind": "array", "itemList": itemList}
 
-    def _digitCheck(self, code):
+    def _byteDigitCheck(self, code):
         return code >= 48 and code <= 57
 
     def _positionAdvance(self, codeSet):
@@ -1158,20 +1164,7 @@ class Pdf:
             pageRaw = pageRawList[a]
 
             self.ctmList = [1, 0, 0, 1, 0, 0]
-            self.textMatrixList = [1, 0, 0, 1, 0, 0]
-            self.lineMatrixList = [1, 0, 0, 1, 0, 0]
-            self.graphicsStateList = []
-            self.fontSize = 0
-            self.charSpacing = 0
-            self.wordSpacing = 0
-            self.horizontalScale = 1
-            self.leading = 0
-            self.textRender = 0
-            self.textRise = 0
-            self.fillColor = "#000000"
-            self.strokeColor = "#000000"
-            self.currentFont = None
-            self._pathReset()
+            self._stateReset()
 
             boxList = pageRaw["boxList"]
 
@@ -1218,7 +1211,7 @@ class Pdf:
             if subtypeNode is None or subtypeNode["kind"] != "name" or subtypeNode["value"] != "Widget" or appearanceNode is None or appearanceNode.get("entryObject") is None or rectList is None:
                 continue
 
-            if int(self._numberValue(annotationObject.get("F"))) & self.flagAnnotationHidden != 0:
+            if int(self._nodeNumberValue(annotationObject.get("F"))) & self.flagAnnotationHidden != 0:
                 continue
 
             normalNode = self._resolve(appearanceNode["entryObject"].get("N"))
@@ -1241,7 +1234,7 @@ class Pdf:
             matrixNode = self._resolve(normalNode["entryObject"].get("Matrix"))
 
             if matrixNode is not None and matrixNode["kind"] == "array" and matrixNode.get("itemList") is not None and len(matrixNode["itemList"]) == 6:
-                matrixList = [self._numberValue(matrixNode["itemList"][b]) for b in range(6)]
+                matrixList = [self._nodeNumberValue(matrixNode["itemList"][b]) for b in range(6)]
 
             cornerList = [
                 self._transformPoint(matrixList, boxList[0], boxList[1]),
@@ -1266,20 +1259,7 @@ class Pdf:
                 resourceObject = resourceNode["entryObject"]
 
             self.ctmList = self._matrixMultiply([scaleX, 0, 0, scaleY, rectList[0] - left * scaleX, rectList[1] - bottom * scaleY], matrixList)
-            self.textMatrixList = [1, 0, 0, 1, 0, 0]
-            self.lineMatrixList = [1, 0, 0, 1, 0, 0]
-            self.graphicsStateList = []
-            self.fontSize = 0
-            self.charSpacing = 0
-            self.wordSpacing = 0
-            self.horizontalScale = 1
-            self.leading = 0
-            self.textRender = 0
-            self.textRise = 0
-            self.fillColor = "#000000"
-            self.strokeColor = "#000000"
-            self.currentFont = None
-            self._pathReset()
+            self._stateReset()
 
             countElement = len(self.elementList)
 
@@ -1303,6 +1283,9 @@ class Pdf:
                 pointList = [[y0, width - x0], [y1, width - x1]]
             else:
                 pointList = [[x0, y0], [x1, y1]]
+
+            if "angle" in elementList[a]:
+                elementList[a]["angle"] = (elementList[a]["angle"] - rotate) % 360
 
             elementList[a]["x0"] = min(pointList[0][0], pointList[1][0])
             elementList[a]["y0"] = min(pointList[0][1], pointList[1][1])
@@ -1379,10 +1362,10 @@ class Pdf:
         itemList = boxNode["itemList"]
 
         valueList = [
-            self._numberValue(itemList[0] if len(itemList) > 0 else None),
-            self._numberValue(itemList[1] if len(itemList) > 1 else None),
-            self._numberValue(itemList[2] if len(itemList) > 2 else None),
-            self._numberValue(itemList[3] if len(itemList) > 3 else None)
+            self._nodeNumberValue(itemList[0] if len(itemList) > 0 else None),
+            self._nodeNumberValue(itemList[1] if len(itemList) > 1 else None),
+            self._nodeNumberValue(itemList[2] if len(itemList) > 2 else None),
+            self._nodeNumberValue(itemList[3] if len(itemList) > 3 else None)
         ]
 
         return [min(valueList[0], valueList[2]), min(valueList[1], valueList[3]), max(valueList[0], valueList[2]), max(valueList[1], valueList[3])]
@@ -1403,7 +1386,7 @@ class Pdf:
 
         return resultList
 
-    def _numberValue(self, node):
+    def _nodeNumberValue(self, node):
         result = 0
 
         resolved = self._resolve(node)
@@ -1466,19 +1449,30 @@ class Pdf:
             else:
                 stackList.append(node)
 
+    def _resourceEntryCollect(self, resourceObject, name, isEntry):
+        resultList = []
+
+        node = self._resolve(resourceObject.get(name))
+
+        if node is not None and node["kind"] == "dictionary" and node.get("entryObject") is not None:
+            nameList = list(node["entryObject"].keys())
+
+            for a in range(len(nameList)):
+                reference = node["entryObject"][nameList[a]]
+                resolved = self._resolve(reference)
+
+                if resolved is not None and (isEntry == False or resolved.get("entryObject") is not None):
+                    resultList.append({"name": nameList[a], "reference": reference, "resolved": resolved})
+
+        return resultList
+
     def _resourceFont(self, resourceObject):
         resultObject = {}
 
-        fontNode = self._resolve(resourceObject.get("Font"))
+        entryList = self._resourceEntryCollect(resourceObject, "Font", False)
 
-        if fontNode is not None and fontNode["kind"] == "dictionary" and fontNode.get("entryObject") is not None:
-            nameList = list(fontNode["entryObject"].keys())
-
-            for a in range(len(nameList)):
-                resolved = self._resolve(fontNode["entryObject"][nameList[a]])
-
-                if resolved is not None:
-                    resultObject[nameList[a]] = self._buildFont(resolved)
+        for a in range(len(entryList)):
+            resultObject[entryList[a]["name"]] = self._buildFont(entryList[a]["resolved"])
 
         return resultObject
 
@@ -1487,6 +1481,14 @@ class Pdf:
 
         baseFontNode = self._resolve(entryObject.get("BaseFont"))
         baseFont = baseFontNode["value"] if baseFontNode is not None and baseFontNode["kind"] == "name" else ""
+
+        descriptorNode = self._resolve(entryObject.get("FontDescriptor"))
+
+        if baseFont == "" and descriptorNode is not None and descriptorNode.get("entryObject") is not None:
+            fontNameNode = self._resolve(descriptorNode["entryObject"].get("FontName"))
+
+            if fontNameNode is not None and fontNameNode["kind"] == "name":
+                baseFont = fontNameNode["value"]
 
         subtypeNode = self._resolve(entryObject.get("Subtype"))
         subtype = subtypeNode["value"] if subtypeNode is not None and subtypeNode["kind"] == "name" else ""
@@ -1500,7 +1502,7 @@ class Pdf:
 
         result = {
             "baseFont": baseFont,
-            "isVertical": self._verticalCheck(encoding, encodingNode),
+            "isVertical": self._encodingVerticalCheck(encoding, encodingNode),
             "verticalFraction": 1.0,
             "verticalObject": {},
             "byteLength": byteLength,
@@ -1543,13 +1545,13 @@ class Pdf:
 
             if widthsNode is not None and widthsNode["kind"] == "array" and widthsNode.get("itemList") is not None:
                 for a in range(len(widthsNode["itemList"])):
-                    result["widthList"].append(self._numberValue(widthsNode["itemList"][a]))
+                    result["widthList"].append(self._nodeNumberValue(widthsNode["itemList"][a]))
 
             if subtype == "Type3":
                 matrixNode = self._resolve(entryObject.get("FontMatrix"))
 
                 if matrixNode is not None and matrixNode["kind"] == "array" and matrixNode.get("itemList") is not None:
-                    result["widthScale"] = self._numberValue(matrixNode["itemList"][0] if len(matrixNode["itemList"]) > 0 else None)
+                    result["widthScale"] = self._nodeNumberValue(matrixNode["itemList"][0] if len(matrixNode["itemList"]) > 0 else None)
 
         result["isCidResolved"] = subtype != "Type0" or encoding[0:8] == "Identity"
 
@@ -1557,7 +1559,7 @@ class Pdf:
 
         return result
 
-    def _verticalCheck(self, encoding, encodingNode):
+    def _encodingVerticalCheck(self, encoding, encodingNode):
         if encoding[-2:] == "-V":
             return True
 
@@ -1576,7 +1578,7 @@ class Pdf:
         if defaultNode is None or defaultNode["kind"] != "array" or defaultNode.get("itemList") is None or len(defaultNode["itemList"]) < 2:
             return 1.0
 
-        return abs(self._numberValue(defaultNode["itemList"][1])) / 1000
+        return abs(self._nodeNumberValue(defaultNode["itemList"][1])) / 1000
 
     def _codecGet(self, encoding):
         for a in range(len(self.codecList)):
@@ -1694,19 +1696,19 @@ class Pdf:
         a = 0
 
         while a < len(itemList):
-            first = self._numberValue(itemList[a])
+            first = self._nodeNumberValue(itemList[a])
             second = self._resolve(itemList[a + 1]) if a + 1 < len(itemList) else None
 
             if second is not None and second["kind"] == "array" and second.get("itemList") is not None:
                 for b in range(0, len(second["itemList"]), stepValue):
-                    resultObject[int(first) + int(b / stepValue)] = abs(self._numberValue(second["itemList"][b])) / 1000
+                    resultObject[int(first) + int(b / stepValue)] = abs(self._nodeNumberValue(second["itemList"][b])) / 1000
 
                 a += 2
 
                 continue
 
-            last = self._numberValue(itemList[a + 1]) if a + 1 < len(itemList) else 0
-            width = abs(self._numberValue(itemList[a + 2])) / 1000 if a + 2 < len(itemList) else 0
+            last = self._nodeNumberValue(itemList[a + 1]) if a + 1 < len(itemList) else 0
+            width = abs(self._nodeNumberValue(itemList[a + 2])) / 1000 if a + 2 < len(itemList) else 0
 
             for cid in range(int(first), int(last) + 1):
                 resultObject[cid] = width
@@ -1724,49 +1726,39 @@ class Pdf:
     def _resourceExternal(self, resourceObject):
         resultObject = {}
 
-        externalNode = self._resolve(resourceObject.get("XObject"))
+        entryList = self._resourceEntryCollect(resourceObject, "XObject", True)
 
-        if externalNode is not None and externalNode["kind"] == "dictionary" and externalNode.get("entryObject") is not None:
-            nameList = list(externalNode["entryObject"].keys())
+        for a in range(len(entryList)):
+            reference = entryList[a]["reference"]
+            resolved = entryList[a]["resolved"]
 
-            for a in range(len(nameList)):
-                reference = externalNode["entryObject"][nameList[a]]
-                resolved = self._resolve(reference)
+            subtypeNode = self._resolve(resolved["entryObject"].get("Subtype"))
 
-                if resolved is not None and resolved.get("entryObject") is not None:
-                    subtypeNode = self._resolve(resolved["entryObject"].get("Subtype"))
-
-                    resultObject[nameList[a]] = {
-                        "referenceNumber": reference["number"] if reference["kind"] == "reference" else 0,
-                        "subtype": subtypeNode["value"] if subtypeNode is not None and subtypeNode["kind"] == "name" else "",
-                        "width": self._numberValue(resolved["entryObject"].get("Width")),
-                        "height": self._numberValue(resolved["entryObject"].get("Height"))
-                    }
+            resultObject[entryList[a]["name"]] = {
+                "referenceNumber": reference["number"] if reference["kind"] == "reference" else 0,
+                "subtype": subtypeNode["value"] if subtypeNode is not None and subtypeNode["kind"] == "name" else "",
+                "width": self._nodeNumberValue(resolved["entryObject"].get("Width")),
+                "height": self._nodeNumberValue(resolved["entryObject"].get("Height"))
+            }
 
         return resultObject
 
     def _resourceState(self, resourceObject):
         resultObject = {}
 
-        stateNode = self._resolve(resourceObject.get("ExtGState"))
+        entryList = self._resourceEntryCollect(resourceObject, "ExtGState", True)
 
-        if stateNode is not None and stateNode["kind"] == "dictionary" and stateNode.get("entryObject") is not None:
-            nameList = list(stateNode["entryObject"].keys())
+        for a in range(len(entryList)):
+            fontNode = self._resolve(entryList[a]["resolved"]["entryObject"].get("Font"))
 
-            for a in range(len(nameList)):
-                resolved = self._resolve(stateNode["entryObject"][nameList[a]])
+            if fontNode is not None and fontNode["kind"] == "array" and fontNode.get("itemList") is not None and len(fontNode["itemList"]) == 2:
+                fontResolved = self._resolve(fontNode["itemList"][0])
 
-                if resolved is not None and resolved.get("entryObject") is not None:
-                    fontNode = self._resolve(resolved["entryObject"].get("Font"))
-
-                    if fontNode is not None and fontNode["kind"] == "array" and fontNode.get("itemList") is not None and len(fontNode["itemList"]) == 2:
-                        fontResolved = self._resolve(fontNode["itemList"][0])
-
-                        if fontResolved is not None:
-                            resultObject[nameList[a]] = {
-                                "font": self._buildFont(fontResolved),
-                                "fontSize": self._numberValue(fontNode["itemList"][1])
-                            }
+                if fontResolved is not None:
+                    resultObject[entryList[a]["name"]] = {
+                        "font": self._buildFont(fontResolved),
+                        "fontSize": self._nodeNumberValue(fontNode["itemList"][1])
+                    }
 
         return resultObject
 
@@ -1944,6 +1936,11 @@ class Pdf:
         ]
 
     def _showText(self, partList, font):
+        if self.isChar:
+            self._showTextChar(partList, font)
+
+            return
+
         text = ""
         advanceStart = 0
         advance = 0
@@ -1957,21 +1954,7 @@ class Pdf:
                 for b in range(len(decoded["charList"])):
                     text += decoded["charList"][b]
 
-                    if font["isVertical"]:
-                        code = decoded["codeList"][b]
-
-                        fraction = font["verticalObject"][code] if font["isCidResolved"] and code in font["verticalObject"] else font["verticalFraction"]
-
-                        advance += fraction * self.fontSize + self.charSpacing
-
-                        continue
-
-                    glyph = decoded["widthFractionList"][b] * self.fontSize + self.charSpacing
-
-                    if font["byteLength"] == 1 and decoded["codeList"][b] == 32:
-                        glyph += self.wordSpacing
-
-                    advance += glyph * self.horizontalScale
+                    advance += self._glyphAdvance(font, decoded, b)["advance"]
             elif part["kind"] == "number":
                 scale = self.fontSize * (1 if font["isVertical"] else self.horizontalScale)
 
@@ -1987,28 +1970,65 @@ class Pdf:
 
         self._textElementAppend(font, advanceStart, advance, text)
 
+        self._textMatrixAdvance(font, advance)
+
+    def _stateReset(self):
+        self.textMatrixList = [1, 0, 0, 1, 0, 0]
+        self.lineMatrixList = [1, 0, 0, 1, 0, 0]
+        self.graphicsStateList = []
+        self.fontSize = 0
+        self.charSpacing = 0
+        self.wordSpacing = 0
+        self.horizontalScale = 1
+        self.leading = 0
+        self.textRender = 0
+        self.textRise = 0
+        self.fillColor = "#000000"
+        self.strokeColor = "#000000"
+        self.currentFont = None
+        self._pathReset()
+
+    def _glyphAdvance(self, font, decoded, index):
+        if font["isVertical"]:
+            code = decoded["codeList"][index]
+
+            fraction = font["verticalObject"][code] if font["isCidResolved"] and code in font["verticalObject"] else font["verticalFraction"]
+
+            size = fraction * self.fontSize
+
+            return {"size": size, "advance": size + self.charSpacing}
+
+        glyph = decoded["widthFractionList"][index] * self.fontSize + self.charSpacing
+
+        if font["byteLength"] == 1 and decoded["codeList"][index] == 32:
+            glyph += self.wordSpacing
+
+        return {"size": decoded["widthFractionList"][index] * self.fontSize * self.horizontalScale, "advance": glyph * self.horizontalScale}
+
+    def _textMatrixAdvance(self, font, advance):
         self.textMatrixList = self._matrixMultiply(self.textMatrixList, [1, 0, 0, 1, 0, -advance] if font["isVertical"] else [1, 0, 0, 1, advance, 0])
+
+    def _textBoxBuild(self, font, renderMatrixList, start, end):
+        if font["isVertical"]:
+            return boxFromPointList([
+                self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise - start),
+                self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise - start),
+                self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise - end),
+                self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise - end)
+            ])
+
+        return boxFromPointList([
+            self._transformPoint(renderMatrixList, start, self.textRise - self.fontSize * 0.2),
+            self._transformPoint(renderMatrixList, end, self.textRise - self.fontSize * 0.2),
+            self._transformPoint(renderMatrixList, end, self.textRise + self.fontSize * 0.8),
+            self._transformPoint(renderMatrixList, start, self.textRise + self.fontSize * 0.8)
+        ])
 
     def _textElementAppend(self, font, advanceStart, advance, text):
         renderMatrixList = self._matrixMultiply(self.ctmList, self.textMatrixList)
         deviceFontSize = self.fontSize * math.hypot(renderMatrixList[2], renderMatrixList[3])
 
-        if font["isVertical"]:
-            cornerList = [
-                self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise - advanceStart),
-                self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise - advanceStart),
-                self._transformPoint(renderMatrixList, self.fontSize * 0.5, self.textRise - advance),
-                self._transformPoint(renderMatrixList, -self.fontSize * 0.5, self.textRise - advance)
-            ]
-        else:
-            cornerList = [
-                self._transformPoint(renderMatrixList, advanceStart, self.textRise - self.fontSize * 0.2),
-                self._transformPoint(renderMatrixList, advance, self.textRise - self.fontSize * 0.2),
-                self._transformPoint(renderMatrixList, advance, self.textRise + self.fontSize * 0.8),
-                self._transformPoint(renderMatrixList, advanceStart, self.textRise + self.fontSize * 0.8)
-            ]
-
-        bboxList = boxFromPointList(cornerList)
+        bboxList = self._textBoxBuild(font, renderMatrixList, advanceStart, advance)
 
         if len(text.strip()) > 0 and self.textRender != 3 and self.textRender != 7:
             self.elementList.append({
@@ -2022,8 +2042,117 @@ class Pdf:
                 "fontSize": math.floor(deviceFontSize * 100 + 0.5) / 100,
                 "isVertical": font["isVertical"],
                 "isWidthEstimated": font["isWidthEstimated"],
-                "color": self.fillColor
+                "color": self.fillColor,
+                "angle": int(round(math.degrees(math.atan2(renderMatrixList[1], renderMatrixList[0])) / 90)) % 4 * 90
             })
+
+    def _showTextChar(self, partList, font):
+        charList = []
+
+        advance = 0
+
+        for a in range(len(partList)):
+            part = partList[a]
+
+            if part["kind"] == "string" or part["kind"] == "hexString":
+                decoded = self._fontDecode(part["value"], font)
+
+                for b in range(len(decoded["charList"])):
+                    start = advance
+
+                    glyphObject = self._glyphAdvance(font, decoded, b)
+
+                    advance += glyphObject["advance"]
+
+                    charList.append({"text": decoded["charList"][b], "start": start, "end": start + glyphObject["size"]})
+            elif part["kind"] == "number":
+                advance -= part["value"] / 1000 * self.fontSize * (1 if font["isVertical"] else self.horizontalScale)
+
+        renderMatrixList = self._matrixMultiply(self.ctmList, self.textMatrixList)
+        deviceFontSize = self.fontSize * math.hypot(renderMatrixList[2], renderMatrixList[3])
+
+        spaceAdvance = 0
+
+        if font["byteLength"] == 1 and font["isVertical"] == False:
+            spaceAdvance = self._fontDecode(" ", font)["widthFractionList"][0] * self.fontSize * self.horizontalScale
+
+        if self.textRender != 3 and self.textRender != 7:
+            pieceList = []
+
+            isSpace = False
+
+            for a in range(len(charList)):
+                if len(charList[a]["text"].strip()) == 0:
+                    isSpace = True
+
+                    continue
+
+                charList[a]["isSpaceBefore"] = isSpace
+
+                isSpace = False
+
+                if len(pieceList) > 0 and charList[a]["start"] - pieceList[len(pieceList) - 1]["end"] <= self.fontSize * self.levelSplit:
+                    pieceObject = pieceList[len(pieceList) - 1]
+
+                    pieceObject["end"] = charList[a]["end"]
+                    pieceObject["charList"].append(charList[a])
+
+                    continue
+
+                pieceList.append({"text": "", "start": charList[a]["start"], "end": charList[a]["end"], "charList": [charList[a]]})
+
+            for a in range(len(pieceList)):
+                pieceCharList = pieceList[a]["charList"]
+
+                gapMedian = gapMedianCalculate(pieceCharList)
+
+                for b in range(len(pieceCharList)):
+                    if b > 0:
+                        characterPrevious = pieceCharList[b - 1]["text"][-1]
+                        characterNext = pieceCharList[b]["text"][0]
+
+                        isNarrow = wideCheck(characterPrevious) == False and wideCheck(characterNext) == False
+
+                        if (pieceCharList[b]["isSpaceBefore"] and isNarrow) or spaceGapCheck(characterPrevious, characterNext, pieceCharList[b]["start"] - pieceCharList[b - 1]["end"], self.fontSize, spaceAdvance, gapMedian):
+                            pieceList[a]["text"] += " "
+
+                    pieceList[a]["text"] += pieceCharList[b]["text"]
+
+            for a in range(len(pieceList)):
+                bboxList = self._textBoxBuild(font, renderMatrixList, pieceList[a]["start"], pieceList[a]["end"])
+
+                charBoxList = []
+
+                for b in range(len(pieceList[a]["charList"])):
+                    charObject = pieceList[a]["charList"][b]
+
+                    if font["isVertical"]:
+                        pointStart = self._transformPoint(renderMatrixList, 0, self.textRise - charObject["start"])
+                        pointEnd = self._transformPoint(renderMatrixList, 0, self.textRise - charObject["end"])
+
+                        charBoxList.append({"text": charObject["text"], "start": self.pageHeight - pointStart[1], "end": self.pageHeight - pointEnd[1]})
+                    else:
+                        pointStart = self._transformPoint(renderMatrixList, charObject["start"], self.textRise)
+                        pointEnd = self._transformPoint(renderMatrixList, charObject["end"], self.textRise)
+
+                        charBoxList.append({"text": charObject["text"], "start": pointStart[0], "end": pointEnd[0]})
+
+                self.elementList.append({
+                    "type": "text",
+                    "charList": charBoxList,
+                    "text": pieceList[a]["text"],
+                    "x0": bboxList[0],
+                    "y0": self.pageHeight - bboxList[3],
+                    "x1": bboxList[2],
+                    "y1": self.pageHeight - bboxList[1],
+                    "fontName": font["baseFont"],
+                    "fontSize": math.floor(deviceFontSize * 100 + 0.5) / 100,
+                    "spaceWidth": spaceAdvance * deviceFontSize / self.fontSize if self.fontSize != 0 else 0,
+                    "isVertical": font["isVertical"],
+                    "color": self.fillColor
+                })
+
+        self._textMatrixAdvance(font, advance)
 
     def _fontDecode(self, raw, font):
         charList = []
@@ -2045,7 +2174,7 @@ class Pdf:
 
                     byteCount = 0
 
-            return {"charList": charList, "widthFractionList": widthFractionList, "codeList": codeList}
+            return self._widthNarrowAdjust(font, {"charList": charList, "widthFractionList": widthFractionList, "codeList": codeList})
 
         for a in range(0, len(raw), font["byteLength"]):
             code = ord(raw[a])
@@ -2075,7 +2204,19 @@ class Pdf:
             widthFractionList.append(widthFraction)
             codeList.append(code)
 
-        return {"charList": charList, "widthFractionList": widthFractionList, "codeList": codeList}
+        return self._widthNarrowAdjust(font, {"charList": charList, "widthFractionList": widthFractionList, "codeList": codeList})
+
+    def _widthNarrowAdjust(self, font, resultObject):
+        if self.isChar == False or font["byteLength"] != 2 or font["isCidResolved"] or font["isUnicodeCode"] == False:
+            return resultObject
+
+        for a in range(len(resultObject["charList"])):
+            character = resultObject["charList"][a]
+
+            if len(character) > 0 and unicodedata.east_asian_width(character[0]) in ["Na", "H"]:
+                resultObject["widthFractionList"][a] = font["defaultWidthFraction"] / 2
+
+        return resultObject
 
     def _transformPoint(self, matrixList, x, y):
         return [x * matrixList[0] + y * matrixList[2] + matrixList[4], x * matrixList[1] + y * matrixList[3] + matrixList[5]]
@@ -2169,7 +2310,9 @@ class Pdf:
 
         return {"message": "", "pageList": pageList}
 
-    def __init__(self):
+    def __init__(self, isChar):
+        self.isChar = isChar
+
         self.delimiterSet = set(ord(value) for value in "()<>[]{}/%")
         self.whitespaceSet = set([0, 9, 10, 12, 13, 32])
         self.digitSet = set(range(48, 58))
@@ -2180,6 +2323,7 @@ class Pdf:
         self.versionEncryptList = [1, 2, 4, 5]
 
         self.levelTextShift = 0.4
+        self.levelSplit = 1.5
 
         self.flagAnnotationHidden = 2 | 32
 

@@ -6,7 +6,7 @@ import numpy
 sys.dont_write_bytecode = True
 
 # Source
-from helper import onnxSessionBuild, tensorNormalize, detrDetect, spacelessCheck, spaceSkipCheck, centerPointCalculate, boxCenterInsideCheck, boxArea, boxIntersection, boxIou, boxContainedRemove, rangeOverlapRatio, flowGapCalculate
+from helper import onnxSessionBuild, tensorNormalize, detrDetect, spacelessCheck, spaceSkipCheck, centerPointCalculate, boxCenterInsideCheck, boxArea, boxIntersection, boxIou, boxContainedRemove, rangeOverlapRatio, flowGapCalculate, levelBoxContained, levelBoxNms, levelSpaceGap, textCutCheck
 
 class Table:
     def _collect(self, astPage):
@@ -76,13 +76,13 @@ class Table:
                 "coordinate": detectionList[a]["bbox"]
             })
 
-        cellList = self._boxSuppression(resultList)
+        cellList = self._cellSuppression(resultList)
         cellList = self._cellContainedRemove(cellList)
         cellList = self._boxOverlapRemove(cellList)
 
         return cellList
 
-    def _boxSuppression(self, boxList):
+    def _cellSuppression(self, boxList):
         resultList = []
 
         boxSortedList = sorted(boxList, key=lambda boxObject: boxObject["score"], reverse=True)
@@ -91,7 +91,7 @@ class Table:
             isOverlapped = False
 
             for b in range(len(resultList)):
-                if boxIou(boxSortedList[a]["coordinate"], resultList[b]["coordinate"]) >= self.levelBoxNms:
+                if boxIou(boxSortedList[a]["coordinate"], resultList[b]["coordinate"]) >= levelBoxNms:
                     isOverlapped = True
 
                     break
@@ -113,13 +113,13 @@ class Table:
 
                 areaChild = boxArea(cellList[b]["coordinate"])
 
-                if boxIntersection(cellList[a]["coordinate"], cellList[b]["coordinate"]) / float(areaChild) >= self.levelBoxContained:
+                if boxIntersection(cellList[a]["coordinate"], cellList[b]["coordinate"]) / float(areaChild) >= levelBoxContained:
                     countContained += 1
 
             if countContained < self.countContainedMinimum:
                 resultList.append(cellList[a])
 
-        return boxContainedRemove(resultList, "coordinate", self.levelBoxContained)
+        return boxContainedRemove(resultList, "coordinate")
 
     def _boxOverlapRemove(self, boxList):
         resultList = []
@@ -250,7 +250,7 @@ class Table:
 
         return resultList
 
-    def _gridBuild(self, cellList):
+    def _gridBuild(self, cellList, isCollision):
         if len(cellList) == 0:
             return cellList
 
@@ -278,6 +278,29 @@ class Table:
         columnPositionList = self._positionFilter(self._positionCluster(xList, toleranceColumn), xList, toleranceColumn)
         rowPositionList = self._positionCluster(yList, toleranceRow)
 
+        self._gridIndexAssign(cellList, columnPositionList, rowPositionList)
+
+        columnCollisionList = []
+
+        for a in range(len(cellList) if isCollision else 0):
+            for b in range(len(cellList)):
+                coordinateList = cellList[a]["coordinate"]
+                coordinateOtherList = cellList[b]["coordinate"]
+
+                if a == b or cellList[a]["rowIndex"] != cellList[b]["rowIndex"] or cellList[a]["columnIndex"] != cellList[b]["columnIndex"] or coordinateOtherList[0] < coordinateList[2] - toleranceColumn:
+                    continue
+
+                position = coordinateOtherList[0]
+
+                if position not in columnPositionList and position not in columnCollisionList:
+                    columnCollisionList.append(position)
+
+        if len(columnCollisionList) > 0:
+            self._gridIndexAssign(cellList, sorted(columnPositionList + columnCollisionList), rowPositionList)
+
+        return sorted(cellList, key=lambda cellObject: (cellObject["rowIndex"], cellObject["columnIndex"]))
+
+    def _gridIndexAssign(self, cellList, columnPositionList, rowPositionList):
         for a in range(len(cellList)):
             coordinateList = cellList[a]["coordinate"]
 
@@ -288,8 +311,6 @@ class Table:
             cellList[a]["columnIndex"] = columnIndex
             cellList[a]["rowSpan"] = max(1, self._positionIndex(coordinateList[3], rowPositionList) - rowIndex)
             cellList[a]["columnSpan"] = max(1, self._positionIndex(coordinateList[2], columnPositionList) - columnIndex)
-
-        return sorted(cellList, key=lambda cellObject: (cellObject["rowIndex"], cellObject["columnIndex"]))
 
     def _rowLineMerge(self, cellList, imageRgb):
         countRow = 0
@@ -409,10 +430,13 @@ class Table:
 
         return indexNearest
 
-    def _textCollect(self, itemList, coordinateTableList):
+    def _textTableCollect(self, itemList, coordinateTableList):
         resultList = []
 
         for a in range(len(itemList)):
+            if "isRotate" in itemList[a]:
+                continue
+
             coordinateList = [
                 itemList[a]["bbox"][0] - coordinateTableList[0],
                 itemList[a]["bbox"][1] - coordinateTableList[1],
@@ -427,7 +451,7 @@ class Table:
 
         return resultList
 
-    def _cellColumnSplit(self, directionObject, cellList, textList):
+    def _cellColumnSplit(self, directionObject, cellList, textList, imageGray):
         resultList = []
 
         indexCross = 0 if directionObject["isVertical"] else 1
@@ -445,7 +469,7 @@ class Table:
 
             positionList = [coordinateList[indexFlow]]
 
-            edgeList = self._columnEdgeCollect(cellList, a, indexCross, indexFlow)
+            edgeList = sorted(self._columnEdgeCollect(cellList, a, indexCross, indexFlow) + self._columnRuleCollect(coordinateList, imageGray, indexFlow))
 
             for b in range(len(edgeList)):
                 if self._columnBreakCheck(textInsideList, indexFlow, edgeList[b], positionList[len(positionList) - 1], coordinateList[indexFlow + 2]):
@@ -499,6 +523,36 @@ class Table:
 
         return resultList
 
+    def _columnRuleCollect(self, coordinateList, imageGray, indexFlow):
+        margin = self.marginCoverage
+
+        region = imageGray[max(0, coordinateList[1] + margin):coordinateList[3] - margin, max(0, coordinateList[0] + margin):coordinateList[2] - margin]
+
+        if region.size == 0:
+            return []
+
+        valueList = numpy.percentile(region, self.levelColumnRuled, axis=indexFlow)
+
+        background = float(numpy.median(valueList))
+
+        resultList = []
+
+        indexStart = -1
+
+        for a in range(len(valueList) + 1):
+            isRuled = a < len(valueList) and background - float(valueList[a]) >= self.levelRowLine
+
+            if isRuled and indexStart < 0:
+                indexStart = a
+
+            if isRuled == False and indexStart >= 0:
+                if a - indexStart <= margin * self.countRuleWidth:
+                    resultList.append(max(0, coordinateList[indexFlow] + margin) + (indexStart + a) // 2)
+
+                indexStart = -1
+
+        return resultList
+
     def _columnBreakCheck(self, textInsideList, indexFlow, edge, flowStart, flowEnd):
         isBefore = False
         isAfter = False
@@ -525,7 +579,7 @@ class Table:
         for a in range(len(cellList)):
             coordinateList = cellList[a]["coordinate"]
 
-            lineList = self._lineGroup(self._textInsideCollect(textList, coordinateList), directionObject)
+            lineList = self._lineCoordinateGroup(self._textInsideCollect(textList, coordinateList), directionObject)
 
             if len(lineList) < 2:
                 resultList.append(cellList[a])
@@ -589,7 +643,7 @@ class Table:
         countText = 0
 
         for a in range(len(neighborList)):
-            lineNeighborList = self._lineGroup(self._textInsideCollect(textList, neighborList[a]), directionObject)
+            lineNeighborList = self._lineCoordinateGroup(self._textInsideCollect(textList, neighborList[a]), directionObject)
 
             if len(lineNeighborList) == 0:
                 continue
@@ -612,7 +666,7 @@ class Table:
 
         return resultList
 
-    def _lineGroup(self, textList, directionObject):
+    def _lineCoordinateGroup(self, textList, directionObject):
         resultList = []
 
         indexCross = 0 if directionObject["isVertical"] else 1
@@ -689,7 +743,7 @@ class Table:
 
         return resultObject
 
-    def _textJoin(self, textList, directionObject):
+    def _textCoordinateJoin(self, textList, directionObject):
         textSortedList = sorted(textList, key=lambda textObject: self._textOrderKey(textObject, directionObject))
 
         result = ""
@@ -700,14 +754,14 @@ class Table:
 
                 continue
 
-            if self._spaceCheck(textSortedList[a - 1]["coordinate"], textSortedList[a]["coordinate"], result, textSortedList[a]["text"], directionObject):
+            if self._spaceCoordinateCheck(textSortedList[a - 1]["coordinate"], textSortedList[a]["coordinate"], result, textSortedList[a]["text"], directionObject):
                 result += " "
 
             result += textSortedList[a]["text"]
 
         return result
 
-    def _spaceCheck(self, coordinatePreviousList, coordinateList, textPrevious, text, directionObject):
+    def _spaceCoordinateCheck(self, coordinatePreviousList, coordinateList, textPrevious, text, directionObject):
         if spaceSkipCheck(textPrevious, text):
             return False
 
@@ -718,7 +772,7 @@ class Table:
 
         gapObject = flowGapCalculate(coordinatePreviousList, coordinateList, directionObject)
 
-        return gapObject["gap"] >= gapObject["size"] * self.levelSpaceGap
+        return gapObject["gap"] >= gapObject["size"] * levelSpaceGap
 
     def _textOrderKey(self, textObject, directionObject):
         coordinateList = textObject["coordinate"]
@@ -755,31 +809,11 @@ class Table:
         for a in range(len(textList)):
             coordinateList = textList[a]["coordinate"]
 
-            margin = (coordinateList[2] - coordinateList[0]) * self.levelMarginText
-
-            isCut = False
-
             for b in range(len(cellList)):
-                cellCoordinateList = cellList[b]["coordinate"]
+                if textCutCheck(coordinateList, cellList[b]["coordinate"]):
+                    resultList.append(coordinateList)
 
-                overlap = min(cellCoordinateList[3], coordinateList[3]) - max(cellCoordinateList[1], coordinateList[1])
-
-                if overlap < (coordinateList[3] - coordinateList[1]) * self.levelOverlapText:
-                    continue
-
-                for c in range(2):
-                    edge = cellCoordinateList[c * 2]
-
-                    if edge > coordinateList[0] + margin and edge < coordinateList[2] - margin:
-                        isCut = True
-
-                        break
-
-                if isCut:
                     break
-
-            if isCut:
-                resultList.append(coordinateList)
 
         return resultList
 
@@ -814,13 +848,17 @@ class Table:
 
         tableList.sort(key=lambda tableObject: indexObject[tuple(tableObject["coordinate"])])
 
-    def cellRefine(self, tableList, itemList, directionObject):
+    def cellRefine(self, tableList, itemList, directionObject, image):
         for a in range(len(tableList)):
-            textList = self._textCollect(itemList, tableList[a]["coordinate"])
+            coordinateList = tableList[a]["coordinate"]
 
-            tableList[a]["cellList"] = self._rowSpanMerge(self._gridBuild(self._cellSplit(directionObject, self._cellColumnSplit(directionObject, tableList[a]["cellList"], textList), textList, tableList[a]["type"])))
+            textList = self._textTableCollect(itemList, coordinateList)
 
-    def _rowSpanMerge(self, cellList):
+            imageGray = cv2.cvtColor(image[coordinateList[1]:coordinateList[3], coordinateList[0]:coordinateList[2]], cv2.COLOR_BGR2GRAY)
+
+            tableList[a]["cellList"] = self._rowSpanMerge(self._gridBuild(self._cellSplit(directionObject, self._cellColumnSplit(directionObject, tableList[a]["cellList"], textList, imageGray), textList, tableList[a]["type"]), True), textList)
+
+    def _rowSpanMerge(self, cellList, textList):
         countRow = 0
         countColumn = 0
 
@@ -840,7 +878,7 @@ class Table:
             else:
                 cellOtherList.append(cellList[a])
 
-        if len(cellSpanList) != 1 or len(cellOtherList) == 0:
+        if len(cellSpanList) != 1 or len(cellOtherList) == 0 or len(self._textInsideCollect(textList, cellSpanList[0]["coordinate"])) == 0:
             return cellList
 
         coordinateList = list(cellOtherList[0]["coordinate"])
@@ -858,18 +896,18 @@ class Table:
 
             score = max(score, cellOtherList[a]["score"])
 
-        return self._gridBuild([{"score": cellSpanList[0]["score"], "coordinate": cellSpanList[0]["coordinate"]}, {"score": score, "coordinate": coordinateList}])
+        return self._gridBuild([{"score": cellSpanList[0]["score"], "coordinate": cellSpanList[0]["coordinate"]}, {"score": score, "coordinate": coordinateList}], False)
 
     def textAssign(self, tableList, itemList, directionObject):
         for a in range(len(tableList)):
-            textList = self._textCollect(itemList, tableList[a]["coordinate"])
+            textList = self._textTableCollect(itemList, tableList[a]["coordinate"])
 
             cellList = tableList[a]["cellList"]
 
             orphanObject = self._textOrphanAssign(textList, cellList)
 
             for b in range(len(cellList)):
-                cellList[b]["text"] = self._textJoin(self._textInsideCollect(textList, cellList[b]["coordinate"]) + orphanObject.get(b, []), directionObject)
+                cellList[b]["text"] = self._textCoordinateJoin(self._textInsideCollect(textList, cellList[b]["coordinate"]) + orphanObject.get(b, []), directionObject)
 
             tableList[a]["cellList"] = self._rowEmptyRemove(cellList)
 
@@ -929,7 +967,7 @@ class Table:
 
             cellList = tableList[a]["cellList"]
 
-            textList = self._textCollect(itemList, coordinateList)
+            textList = self._textTableCollect(itemList, coordinateList)
 
             coverageList = self._coverageValidate(self._coverageCollect(imageRgb, cellList), textList)
 
@@ -937,7 +975,7 @@ class Table:
 
             self._debugCell(image, coordinateList, cellList, coverageList, textCutList, pathOutput, numberPage, countStart + a + 1, tableList[a]["type"])
 
-    def resultBuild(self, tablePageList, countStart, numberPage):
+    def resultTableBuild(self, tablePageList, countStart, numberPage):
         resultList = []
 
         for a in range(len(tablePageList)):
@@ -992,10 +1030,10 @@ class Table:
 
             cellList = self._cellDetect(imageRgb, typeObject["type"])
             cellList = self._cellRecover(imageRgb, cellList)
-            cellList = self._gridBuild(cellList)
+            cellList = self._gridBuild(cellList, False)
 
             if typeObject["type"] == "wired":
-                cellList = self._gridBuild(self._rowLineMerge(cellList, imageRgb))
+                cellList = self._gridBuild(self._rowLineMerge(cellList, imageRgb), False)
 
             resultList.append({
                 "coordinate": coordinateList,
@@ -1024,20 +1062,17 @@ class Table:
         self.normalizeMeanList = numpy.array([0.485, 0.456, 0.406], dtype=numpy.float32)
         self.normalizeStdList = numpy.array([0.229, 0.224, 0.225], dtype=numpy.float32)
 
-        self.levelBoxContained = 0.9
-        self.levelBoxNms = 0.5
         self.levelBoxOverlap = 0.7
         self.levelCoverageArea = 0.002
         self.levelCoverageKernel = 0.4
         self.levelCoverageSize = 0.4
         self.levelMarginCoverage = 0.02
-        self.levelMarginText = 0.15
         self.levelOverlapLine = 0.5
         self.levelRowEdge = 0.5
         self.levelRowLine = 12
+        self.levelColumnRuled = 90
+        self.countRuleWidth = 4
         self.levelRowRuled = 0.5
-        self.levelSpaceGap = 0.15
-        self.levelOverlapText = 0.5
         self.levelGridSupport = 0.25
         self.levelGridTolerance = 0.3
 
