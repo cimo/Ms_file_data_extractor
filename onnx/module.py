@@ -10290,6 +10290,7 @@ class Module:
     def _optionBoxBuild(self, elementList, scale, height):
         squareList = []
         inkList = []
+        inkTextList = []
 
         for a in range(len(elementList)):
             elementObject = elementList[a]
@@ -10306,6 +10307,7 @@ class Module:
                 squareList.append(bboxList)
             else:
                 inkList.append(bboxList)
+                inkTextList.append(elementObject["text"] if elementObject["type"] == "text" and elementObject.get("fieldIndex") is None else None)
 
         resultList = []
 
@@ -10331,6 +10333,9 @@ class Module:
                 continue
 
             isMark = False
+            isCode = True
+
+            code = ""
 
             isSwatch = False
 
@@ -10350,7 +10355,10 @@ class Module:
                 if centerX > bboxList[0] and centerX < bboxList[2] and centerY > bboxList[1] and centerY < bboxList[3] and inkList[b][0] >= bboxList[0] - size * self.levelOptionBoxGap and inkList[b][2] <= bboxList[2] + size * self.levelOptionBoxGap:
                     isMark = True
 
-                    break
+                    if inkTextList[b] is None:
+                        isCode = False
+                    else:
+                        code += inkTextList[b].strip()
 
             isDuplicate = False
 
@@ -10359,7 +10367,24 @@ class Module:
                     isDuplicate = True
 
             if isDuplicate == False:
-                resultList.append({"bbox": bboxList, "isBox": True, "isMark": isMark})
+                resultList.append({"bbox": bboxList, "isBox": True, "isMark": isMark, "code": code if isCode else ""})
+
+        codeList = []
+
+        for a in range(len(resultList)):
+            if resultList[a]["code"] != "":
+                codeList.append(resultList[a]["code"])
+
+        isCodeValid = len(codeList) >= self.countOptionCode and len(set(codeList)) == len(codeList)
+
+        for a in range(len(resultList)):
+            if resultList[a]["code"] == "":
+                continue
+
+            if isCodeValid:
+                resultList[a]["isMark"] = False
+            else:
+                resultList[a]["code"] = ""
 
         return resultList
 
@@ -10448,6 +10473,9 @@ class Module:
                 continue
 
             textOption = textOptionMark if boxList[a]["isMark"] else textOptionEmpty
+
+            if boxList[a]["code"] != "":
+                textOption = f"{textOption} {boxList[a]['code']}"
 
             itemBest["text"] = f"{textOption} {itemBest['text']}" if isRight else f"{itemBest['text']} {textOption}"
 
@@ -10746,6 +10774,7 @@ class Module:
         self.levelCircleSquare = 0.2
         self.levelOptionBoxMinimum = 0.5
         self.levelOptionBoxGap = 0.5
+        self.countOptionCode = 2
         self.levelOptionBoxLabel = 1.0
         self.levelOptionLineGap = 0.5
         self.levelCellBelow = 1.5

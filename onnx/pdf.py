@@ -600,6 +600,12 @@ class Pdf:
                 elif nextCode == 116:
                     value += "\t"
                     self.position += 2
+                elif nextCode == 98:
+                    value += "\b"
+                    self.position += 2
+                elif nextCode == 102:
+                    value += "\f"
+                    self.position += 2
                 elif nextCode >= 48 and nextCode <= 55:
                     octalText = ""
                     count = 0
@@ -1424,6 +1430,7 @@ class Pdf:
         fontObject = self._resourceFont(resourceObject)
         externalObject = self._resourceExternal(resourceObject)
         stateObject = self._resourceState(resourceObject)
+        colorObject = self._resourceColor(resourceObject)
 
         self.byteList = self._textByte(content)
         self.text = content
@@ -1441,7 +1448,7 @@ class Pdf:
 
             if node["kind"] == "operator":
                 if len(node["value"]) > 0:
-                    self._handleOperator(node["value"], stackList, stateObject, fontObject, externalObject)
+                    self._handleOperator(node["value"], stackList, stateObject, fontObject, externalObject, colorObject)
                 else:
                     self.position += 1
 
@@ -1743,6 +1750,330 @@ class Pdf:
 
         return resultObject
 
+    def _resourceColor(self, resourceObject):
+        resultObject = {}
+
+        entryList = self._resourceEntryCollect(resourceObject, "ColorSpace", False)
+
+        for a in range(len(entryList)):
+            resultObject[entryList[a]["name"]] = self._buildColorSpace(entryList[a]["resolved"])
+
+        return resultObject
+
+    def _buildColorSpace(self, node):
+        resolved = self._resolve(node)
+
+        if resolved is None:
+            return None
+
+        if resolved["kind"] == "name":
+            if resolved["value"] in self.colorSpaceObject:
+                return {"kind": self.colorSpaceObject[resolved["value"]]}
+
+            return None
+
+        if resolved["kind"] != "array" or resolved.get("itemList") is None or len(resolved["itemList"]) < 2:
+            return None
+
+        itemList = resolved["itemList"]
+
+        nameNode = self._resolve(itemList[0])
+
+        if nameNode is None or nameNode["kind"] != "name":
+            return None
+
+        name = nameNode["value"]
+
+        if name in self.colorSpaceObject:
+            return {"kind": self.colorSpaceObject[name]}
+
+        parameterNode = self._resolve(itemList[1])
+
+        if name == "ICCBased" and parameterNode is not None and parameterNode.get("entryObject") is not None:
+            countComponent = self._nodeNumberValue(parameterNode["entryObject"].get("N"))
+
+            if countComponent in self.colorSpaceCountObject:
+                return {"kind": self.colorSpaceCountObject[countComponent]}
+
+            return None
+
+        if name == "Lab" and parameterNode is not None and parameterNode.get("entryObject") is not None:
+            whiteList = self._nodeNumberList(parameterNode["entryObject"].get("WhitePoint"))
+            rangeList = self._nodeNumberList(parameterNode["entryObject"].get("Range"))
+
+            if len(whiteList) != 3:
+                return None
+
+            if len(rangeList) != 4:
+                rangeList = [-100, 100, -100, 100]
+
+            return {"kind": "lab", "whiteList": whiteList, "rangeList": rangeList}
+
+        if name == "Indexed" and len(itemList) == 4:
+            baseObject = self._buildColorSpace(itemList[1])
+
+            lookupNode = self._resolve(itemList[3])
+
+            if baseObject is None or lookupNode is None:
+                return None
+
+            if lookupNode["kind"] == "stream" and lookupNode.get("content") is not None:
+                return {"kind": "indexed", "baseObject": baseObject, "lookupByteList": self._textByte(lookupNode["content"])}
+
+            return {"kind": "indexed", "baseObject": baseObject, "lookupByteList": self._stringByte(lookupNode)}
+
+        if (name == "Separation" or name == "DeviceN") and len(itemList) >= 4:
+            baseObject = self._buildColorSpace(itemList[2])
+
+            if baseObject is None:
+                return None
+
+            return {"kind": "tint", "baseObject": baseObject, "functionNode": itemList[3]}
+
+        return None
+
+    def _nodeNumberList(self, node):
+        resultList = []
+
+        resolved = self._resolve(node)
+
+        if resolved is not None and resolved["kind"] == "array" and resolved.get("itemList") is not None:
+            for a in range(len(resolved["itemList"])):
+                resultList.append(self._nodeNumberValue(resolved["itemList"][a]))
+
+        return resultList
+
+    def _colorSpaceFind(self, stackList, colorObject):
+        nameNode = stackList[len(stackList) - 1] if len(stackList) > 0 else None
+
+        if nameNode is None or nameNode["kind"] != "name":
+            return None
+
+        if nameNode["value"] in self.colorSpaceObject:
+            return {"kind": self.colorSpaceObject[nameNode["value"]]}
+
+        return colorObject.get(nameNode["value"])
+
+    def _colorSpaceColor(self, spaceObject, stackList, color):
+        valueList = []
+
+        for a in range(len(stackList)):
+            if stackList[a]["kind"] != "number":
+                return color
+
+            valueList.append(stackList[a]["value"])
+
+        if spaceObject is None:
+            return color
+
+        rgbList = self._colorSpaceRgb(spaceObject, valueList)
+
+        if rgbList is None:
+            return color
+
+        return self._colorRgb(rgbList[0], rgbList[1], rgbList[2])
+
+    def _colorSpaceRgb(self, spaceObject, valueList):
+        kind = spaceObject["kind"]
+
+        if kind == "gray" and len(valueList) == 1:
+            return [valueList[0], valueList[0], valueList[0]]
+
+        if kind == "rgb" and len(valueList) == 3:
+            return valueList
+
+        if kind == "cmyk" and len(valueList) == 4:
+            return [(1 - valueList[0]) * (1 - valueList[3]), (1 - valueList[1]) * (1 - valueList[3]), (1 - valueList[2]) * (1 - valueList[3])]
+
+        if kind == "lab" and len(valueList) == 3:
+            return self._labRgb(spaceObject["whiteList"], valueList)
+
+        if kind == "indexed" and len(valueList) == 1:
+            baseObject = spaceObject["baseObject"]
+
+            if baseObject["kind"] not in self.colorSpaceKindObject:
+                return None
+
+            countComponent = self.colorSpaceKindObject[baseObject["kind"]]
+
+            start = int(valueList[0]) * countComponent
+
+            if start < 0 or start + countComponent > len(spaceObject["lookupByteList"]):
+                return None
+
+            baseList = []
+
+            for a in range(countComponent):
+                baseList.append(spaceObject["lookupByteList"][start + a] / 255)
+
+            if baseObject["kind"] == "lab":
+                rangeList = baseObject["rangeList"]
+
+                baseList = [baseList[0] * 100, rangeList[0] + baseList[1] * (rangeList[1] - rangeList[0]), rangeList[2] + baseList[2] * (rangeList[3] - rangeList[2])]
+
+            return self._colorSpaceRgb(baseObject, baseList)
+
+        if kind == "tint" and len(valueList) > 0:
+            outputList = self._functionEvaluate(spaceObject["functionNode"], valueList)
+
+            if outputList is None:
+                return None
+
+            return self._colorSpaceRgb(spaceObject["baseObject"], outputList)
+
+        return None
+
+    def _labRgb(self, whiteList, valueList):
+        levelY = (valueList[0] + 16) / 116
+
+        fractionList = [levelY + valueList[1] / 500, levelY, levelY - valueList[2] / 200]
+
+        xyzList = []
+
+        for a in range(len(fractionList)):
+            if fractionList[a] > 6 / 29:
+                xyzList.append(whiteList[a] * fractionList[a] ** 3)
+            else:
+                xyzList.append(whiteList[a] * 3 * (6 / 29) ** 2 * (fractionList[a] - 4 / 29))
+
+        resultList = []
+
+        for a in range(len(self.matrixXyzRgbList)):
+            linear = self.matrixXyzRgbList[a][0] * xyzList[0] + self.matrixXyzRgbList[a][1] * xyzList[1] + self.matrixXyzRgbList[a][2] * xyzList[2]
+
+            linear = max(0, min(1, linear))
+
+            if linear <= 0.0031308:
+                resultList.append(12.92 * linear)
+            else:
+                resultList.append(1.055 * linear ** (1 / 2.4) - 0.055)
+
+        return resultList
+
+    def _functionEvaluate(self, node, inputList):
+        resolved = self._resolve(node)
+
+        if resolved is None or resolved.get("entryObject") is None:
+            return None
+
+        entryObject = resolved["entryObject"]
+
+        domainList = self._nodeNumberList(entryObject.get("Domain"))
+
+        if len(domainList) != 2 or len(inputList) != 1:
+            return None
+
+        value = max(domainList[0], min(domainList[1], inputList[0]))
+
+        functionType = self._nodeNumberValue(entryObject.get("FunctionType"))
+
+        if functionType == 2:
+            startList = self._nodeNumberList(entryObject.get("C0"))
+            endList = self._nodeNumberList(entryObject.get("C1"))
+
+            if len(startList) == 0:
+                startList = [0]
+
+            if len(endList) == 0:
+                endList = [1]
+
+            if len(startList) != len(endList):
+                return None
+
+            exponent = self._nodeNumberValue(entryObject.get("N"))
+
+            resultList = []
+
+            for a in range(len(startList)):
+                resultList.append(startList[a] + value ** exponent * (endList[a] - startList[a]))
+
+            return resultList
+
+        if functionType == 3:
+            functionNode = self._resolve(entryObject.get("Functions"))
+            boundList = self._nodeNumberList(entryObject.get("Bounds"))
+            encodeList = self._nodeNumberList(entryObject.get("Encode"))
+
+            if functionNode is None or functionNode["kind"] != "array" or functionNode.get("itemList") is None:
+                return None
+
+            if len(functionNode["itemList"]) != len(boundList) + 1 or len(encodeList) != len(functionNode["itemList"]) * 2:
+                return None
+
+            index = 0
+
+            while index < len(boundList) and value >= boundList[index]:
+                index += 1
+
+            low = domainList[0] if index == 0 else boundList[index - 1]
+            high = domainList[1] if index == len(boundList) else boundList[index]
+
+            encoded = encodeList[index * 2]
+
+            if high > low:
+                encoded = encodeList[index * 2] + (value - low) * (encodeList[index * 2 + 1] - encodeList[index * 2]) / (high - low)
+
+            return self._functionEvaluate(functionNode["itemList"][index], [encoded])
+
+        if functionType == 0 and resolved["kind"] == "stream" and resolved.get("content") is not None:
+            sizeList = self._nodeNumberList(entryObject.get("Size"))
+            rangeList = self._nodeNumberList(entryObject.get("Range"))
+            encodeList = self._nodeNumberList(entryObject.get("Encode"))
+            decodeList = self._nodeNumberList(entryObject.get("Decode"))
+
+            countBit = int(self._nodeNumberValue(entryObject.get("BitsPerSample")))
+
+            if len(sizeList) != 1 or sizeList[0] < 1 or len(rangeList) < 2 or countBit < 1:
+                return None
+
+            countSample = int(sizeList[0])
+            countOutput = len(rangeList) // 2
+
+            if len(encodeList) != 2:
+                encodeList = [0, countSample - 1]
+
+            if len(decodeList) != len(rangeList):
+                decodeList = rangeList
+
+            sampleByteList = self._textByte(resolved["content"])
+
+            if countSample * countOutput * countBit > len(sampleByteList) * 8:
+                return None
+
+            position = encodeList[0]
+
+            if domainList[1] > domainList[0]:
+                position = encodeList[0] + (value - domainList[0]) * (encodeList[1] - encodeList[0]) / (domainList[1] - domainList[0])
+
+            position = max(0, min(countSample - 1, position))
+
+            indexLow = math.floor(position)
+            indexHigh = min(indexLow + 1, countSample - 1)
+
+            resultList = []
+
+            for a in range(countOutput):
+                sampleLow = self._sampleValue(sampleByteList, countBit, indexLow * countOutput + a)
+                sampleHigh = self._sampleValue(sampleByteList, countBit, indexHigh * countOutput + a)
+
+                sample = sampleLow + (position - indexLow) * (sampleHigh - sampleLow)
+
+                resultList.append(decodeList[a * 2] + sample / (2 ** countBit - 1) * (decodeList[a * 2 + 1] - decodeList[a * 2]))
+
+            return resultList
+
+        return None
+
+    def _sampleValue(self, byteList, countBit, index):
+        result = 0
+
+        for a in range(countBit):
+            position = index * countBit + a
+
+            result = (result << 1) | ((byteList[position // 8] >> (7 - position % 8)) & 1)
+
+        return result
+
     def _resourceState(self, resourceObject):
         resultObject = {}
 
@@ -1762,7 +2093,7 @@ class Pdf:
 
         return resultObject
 
-    def _handleOperator(self, operator, stackList, stateObject, fontObject, externalObject):
+    def _handleOperator(self, operator, stackList, stateObject, fontObject, externalObject, colorObject):
         def number(indexFromEnd):
             result = 0
 
@@ -1788,7 +2119,9 @@ class Pdf:
                 "textRender": self.textRender,
                 "textRise": self.textRise,
                 "fillColor": self.fillColor,
-                "strokeColor": self.strokeColor
+                "strokeColor": self.strokeColor,
+                "fillSpace": self.fillSpace,
+                "strokeSpace": self.strokeSpace
             })
         elif operator == "Q":
             if len(self.graphicsStateList) > 0:
@@ -1805,6 +2138,8 @@ class Pdf:
                 self.textRise = stateObject["textRise"]
                 self.fillColor = stateObject["fillColor"]
                 self.strokeColor = stateObject["strokeColor"]
+                self.fillSpace = stateObject["fillSpace"]
+                self.strokeSpace = stateObject["strokeSpace"]
         elif operator == "BT":
             self.textMatrixList = [1, 0, 0, 1, 0, 0]
             self.lineMatrixList = [1, 0, 0, 1, 0, 0]
@@ -1861,16 +2196,22 @@ class Pdf:
             if len(stackList) > 0:
                 self._showText([stackList[len(stackList) - 1]], self.currentFont)
         elif operator == "g":
+            self.fillSpace = {"kind": "gray"}
             self.fillColor = self._colorRgb(number(1), number(1), number(1))
         elif operator == "G":
+            self.strokeSpace = {"kind": "gray"}
             self.strokeColor = self._colorRgb(number(1), number(1), number(1))
         elif operator == "rg":
+            self.fillSpace = {"kind": "rgb"}
             self.fillColor = self._colorRgb(number(3), number(2), number(1))
         elif operator == "RG":
+            self.strokeSpace = {"kind": "rgb"}
             self.strokeColor = self._colorRgb(number(3), number(2), number(1))
         elif operator == "k":
+            self.fillSpace = {"kind": "cmyk"}
             self.fillColor = self._colorRgb((1 - number(4)) * (1 - number(1)), (1 - number(3)) * (1 - number(1)), (1 - number(2)) * (1 - number(1)))
         elif operator == "K":
+            self.strokeSpace = {"kind": "cmyk"}
             self.strokeColor = self._colorRgb((1 - number(4)) * (1 - number(1)), (1 - number(3)) * (1 - number(1)), (1 - number(2)) * (1 - number(1)))
         elif operator == "m" or operator == "l" or operator == "c" or operator == "v" or operator == "y":
             self._pathAddPoint(number(2), number(1))
@@ -1924,6 +2265,14 @@ class Pdf:
             endIndex = self.text.find("EI", self.position)
 
             self.position = endIndex + 2 if endIndex >= 0 else len(self.byteList)
+        elif operator == "cs":
+            self.fillSpace = self._colorSpaceFind(stackList, colorObject)
+        elif operator == "CS":
+            self.strokeSpace = self._colorSpaceFind(stackList, colorObject)
+        elif operator == "sc" or operator == "scn":
+            self.fillColor = self._colorSpaceColor(self.fillSpace, stackList, self.fillColor)
+        elif operator == "SC" or operator == "SCN":
+            self.strokeColor = self._colorSpaceColor(self.strokeSpace, stackList, self.strokeColor)
 
     def _matrixMultiply(self, rightList, leftList):
         return [
@@ -1985,6 +2334,8 @@ class Pdf:
         self.textRise = 0
         self.fillColor = "#000000"
         self.strokeColor = "#000000"
+        self.fillSpace = {"kind": "gray"}
+        self.strokeSpace = {"kind": "gray"}
         self.currentFont = None
         self._pathReset()
 
@@ -2328,6 +2679,12 @@ class Pdf:
         self.flagAnnotationHidden = 2 | 32
 
         self.levelPathBox = 0.05
+
+        self.colorSpaceObject = {"DeviceGray": "gray", "CalGray": "gray", "G": "gray", "DeviceRGB": "rgb", "CalRGB": "rgb", "RGB": "rgb", "DeviceCMYK": "cmyk", "CMYK": "cmyk"}
+        self.colorSpaceCountObject = {1: "gray", 3: "rgb", 4: "cmyk"}
+        self.colorSpaceKindObject = {"gray": 1, "rgb": 3, "cmyk": 4, "lab": 3}
+
+        self.matrixXyzRgbList = [[3.1338561, -1.6168667, -0.4906146], [-0.9787684, 1.9161415, 0.0334540], [0.0719453, -0.2289914, 1.4052427]]
 
         self.messageEncryption = "Encryption not supported."
         self.messagePasswordRequired = "Password required."

@@ -1136,7 +1136,7 @@ class Markdown:
                     numberOrder = orderObject["number"]
                     markOrder = orderObject["mark"]
 
-                if result != "" and a > 0 and (isOrder or self._listMarkCheck(text) or self._lineFieldCheck(lineList[a - 1], directionObject) or self._lineBreakCheck(directionObject, lineList, a, text) or self._lineOutdentCheck(startDominant, lineList[a], directionObject)):
+                if result != "" and a > 0 and (isOrder or self._listMarkCheck(text) or self._lineFieldCheck(lineList[a - 1], directionObject) or self._lineBreakCheck(directionObject, lineList, a, text) or self._lineOutdentCheck(startDominant, lineList[a], directionObject) or (isColumnGap and self._lineRowBreakCheck(lineList[a - 1], lineList[a], directionObject))):
                     result += f"{self.markdown.separatorLine}{text}"
                 else:
                     result = self.markdown._textJoin([result, text])
@@ -1145,6 +1145,32 @@ class Markdown:
                 partList.append(result)
 
             return self.markdown.separatorBlock.join(partList)
+
+        def _lineRowBreakCheck(self, linePreviousObject, lineObject, directionObject):
+            if self._lineRowStart(lineObject, directionObject) != None:
+                return True
+
+            startPrevious = self._lineRowStart(linePreviousObject, directionObject)
+
+            if startPrevious == None:
+                return False
+
+            return startPrevious - self._lineStart(lineObject, directionObject) > self._lineSize(lineObject, directionObject) * self.levelLineOutdent
+
+        def _lineRowStart(self, lineObject, directionObject):
+            directionPageObject = directionObject[lineObject["page"]]
+
+            itemSortedList = sorted(lineObject["itemList"], key=lambda itemObject: self._itemOrderKey(itemObject["bbox"], directionPageObject))
+
+            result = None
+
+            for a in range(1, len(itemSortedList)):
+                gapObject = flowGapCalculate(itemSortedList[a - 1]["bbox"], itemSortedList[a]["bbox"], directionPageObject)
+
+                if gapObject["gap"] >= gapObject["size"] * self.levelColumnGap:
+                    result = self._lineStart({"page": lineObject["page"], "bbox": itemSortedList[a]["bbox"]}, directionObject)
+
+            return result
 
         def _lineFieldCheck(self, lineObject, directionObject):
             directionPageObject = directionObject[lineObject["page"]]

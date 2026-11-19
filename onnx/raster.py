@@ -354,7 +354,15 @@ class Raster:
                 if itemList[a]["label"] not in self.raster.layout.labelFigureList:
                     continue
 
-                bboxList = itemList[a]["bbox"]
+                bboxList = [max(0, int(itemList[a]["bbox"][0])), max(0, int(itemList[a]["bbox"][1])), min(imageWidth, int(itemList[a]["bbox"][2])), min(imageHeight, int(itemList[a]["bbox"][3]))]
+
+                width = bboxList[2] - bboxList[0]
+                height = bboxList[3] - bboxList[1]
+
+                if width <= 0 or height <= 0:
+                    continue
+
+                maskFree = numpy.ones((height, width), dtype=bool)
 
                 countText = 0
 
@@ -363,32 +371,31 @@ class Raster:
                 for b in range(len(elementList)):
                     element = elementList[b]
 
-                    x0 = element["x0"] * scaleX
-                    y0 = element["y0"] * scaleY
-                    x1 = element["x1"] * scaleX
-                    y1 = element["y1"] * scaleY
+                    x0 = max(bboxList[0], int(element["x0"] * scaleX))
+                    y0 = max(bboxList[1], int(element["y0"] * scaleY))
+                    x1 = min(bboxList[2], int(element["x1"] * scaleX) + 1)
+                    y1 = min(bboxList[3], int(element["y1"] * scaleY) + 1)
 
-                    if min(x1, bboxList[2]) <= max(x0, bboxList[0]) or min(y1, bboxList[3]) <= max(y0, bboxList[1]):
+                    if x1 <= x0 or y1 <= y0:
                         continue
 
                     if element["type"] == "text":
                         countText += 1
 
-                        continue
-
-                    if element["type"] == "image" or element["isCurve"]:
+                        maskFree[y0 - bboxList[1]:y1 - bboxList[1], x0 - bboxList[0]:x1 - bboxList[0]] = False
+                    elif element["type"] == "image" and (x1 - x0) * (y1 - y0) >= width * height * self.levelFigureImage:
                         isFigure = True
 
                         break
 
-                    size = min(element["x1"] - element["x0"], element["y1"] - element["y0"])
+                if isFigure or countText == 0:
+                    continue
 
-                    if element["isFill"] and size > self.levelFigureFill and self.raster.module._colorLightCheck(element["color"]) == False:
-                        isFigure = True
+                crop = image[bboxList[1]:bboxList[3], bboxList[0]:bboxList[2]].astype(numpy.float32)
 
-                        break
+                maskInk = (crop.max(axis=2) + crop.min(axis=2)) / 510 < self.levelFigureLight
 
-                if isFigure == False and countText > 0:
+                if numpy.count_nonzero(maskInk & maskFree) < max(1, numpy.count_nonzero(maskFree)) * self.levelFigureInk:
                     itemList[a]["label"] = self.labelText
 
         def _rotateSplit(self, elementList):
@@ -786,11 +793,16 @@ class Raster:
             for a in range(len(matchList)):
                 count = 0
 
+                isAlone = True
+
                 for b in range(len(matchList)):
                     if abs(matchList[a]["bullet"]["x0"] - matchList[b]["bullet"]["x0"]) <= matchList[a]["text"]["fontSize"] * self.levelBulletSize:
                         count += 1
 
-                if count >= self.countBullet:
+                    if matchList[b]["text"] is matchList[a]["text"] and (matchList[b]["bullet"]["x1"] <= matchList[a]["bullet"]["x0"] or matchList[b]["bullet"]["x0"] >= matchList[a]["bullet"]["x1"]):
+                        isAlone = False
+
+                if count >= self.countBullet and isAlone:
                     matchList[a]["text"]["text"] = f"{textBullet}{matchList[a]['text']['text']}"
 
             return elementList
@@ -1029,7 +1041,9 @@ class Raster:
             self.levelBoxElementOverlap = 0.5
             self.levelBulletSize = 0.6
             self.levelBulletGap = 3.0
-            self.levelFigureFill = 3.0
+            self.levelFigureImage = 0.5
+            self.levelFigureInk = 0.1
+            self.levelFigureLight = 0.7
             self.levelRotateLine = 1.5
             self.levelRuleTouch = 1.0
             self.levelCaptionGap = 2.0
