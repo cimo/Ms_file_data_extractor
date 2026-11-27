@@ -94,6 +94,7 @@ export default class Service {
 
                     let fileName = "";
                     let password = "";
+                    let owner = "";
 
                     for (let a = 0; a < resultControllerUpload.formDataList.length; a++) {
                         const formData = resultControllerUpload.formDataList[a];
@@ -102,6 +103,8 @@ export default class Service {
                             fileName = formData.fileName;
                         } else if (formData.name === "password" && formData.buffer) {
                             password = formData.buffer.toString();
+                        } else if (formData.name === "owner" && formData.buffer) {
+                            owner = formData.buffer.toString();
                         }
                     }
 
@@ -110,6 +113,21 @@ export default class Service {
                     const pathInput = `${helperSrc.PATH_ROOT}${helperSrc.PATH_FILE}input/${uniqueId}/${fileDetail.baseName}/${fileDetail.name}`;
                     const pathInputBasename = `${helperSrc.PATH_ROOT}${helperSrc.PATH_FILE}input/${uniqueId}/`;
                     const pathOutput = `${helperSrc.PATH_ROOT}${helperSrc.PATH_FILE}output/${uniqueId}/`;
+
+                    if (this.cq.checkOwner(owner)) {
+                        helperSrc.responseBody({ state: "ko", message: "Only one request at a time is allowed." }, response, 200);
+
+                        const fileOrFolderDeleteInput = await helperSrc.fileOrFolderDelete(pathInputBasename);
+
+                        if (typeof fileOrFolderDeleteInput !== "boolean") {
+                            helperSrc.writeLog(
+                                "Service.ts - api() - post(/api/extract) - checkOwner() - fileOrFolderDelete()",
+                                fileOrFolderDeleteInput.toString()
+                            );
+                        }
+
+                        return;
+                    }
 
                     this.jobObject[uniqueId] = {
                         state: "",
@@ -120,6 +138,7 @@ export default class Service {
 
                     this.cq.jobList.push({
                         id: uniqueId,
+                        owner,
                         callback: async () => {
                             await this.engine(uniqueId, pathInput, pathOutput, password);
 
@@ -177,23 +196,23 @@ export default class Service {
             } else if (job.state === "ok") {
                 const pathOutput = `${helperSrc.PATH_ROOT}${helperSrc.PATH_FILE}output/${uniqueId}/`;
 
-                const fileReadStream = await helperSrc.fileReadStream(`${pathOutput}result.zip`);
+                const fileReadStream = await helperSrc.fileReadStream(`${pathOutput}result.md`);
 
                 if (!Buffer.isBuffer(fileReadStream)) {
                     helperSrc.writeLog("Service.ts - api() - post(/api/extract-check) - fileReadStream()", fileReadStream.toString());
 
                     helperSrc.responseBody({ state: "ko", message: fileReadStream.toString() }, response, 500);
                 } else {
-                    helperSrc.responseBody({ state: "ok", message: "", data: fileReadStream.toString("base64") }, response, 200);
+                    helperSrc.responseBody({ state: "ok", message: "", data: fileReadStream.toString() }, response, 200);
                 }
 
                 delete this.jobObject[uniqueId];
 
-                /*const fileOrFolderDeleteOutput = await helperSrc.fileOrFolderDelete(pathOutput);
+                const fileOrFolderDeleteOutput = await helperSrc.fileOrFolderDelete(pathOutput);
 
                 if (typeof fileOrFolderDeleteOutput !== "boolean") {
                     helperSrc.writeLog("Service.ts - api() - post(/api/extract-check) - fileOrFolderDelete()", fileOrFolderDeleteOutput.toString());
-                }*/
+                }
             } else {
                 helperSrc.responseBody({ state: job.state, message: job.message }, response, job.isError ? 500 : 200);
 

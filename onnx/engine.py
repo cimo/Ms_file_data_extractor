@@ -2,7 +2,6 @@ import sys
 import os
 import json
 import time
-import zipfile
 import subprocess
 import math
 import numpy
@@ -600,9 +599,6 @@ class Engine:
     def _resultWrite(self, pathOutput, itemList, pathInput, timeStart):
         with open(f"{pathOutput}result.md", "w", encoding="utf-8") as file:
             file.write(self.markdown.execute(itemList))
-
-        with zipfile.ZipFile(f"{pathOutput}result.zip", "w") as zipFile:
-            zipFile.write(f"{pathOutput}result.md", "result.md", zipfile.ZIP_DEFLATED)
 
         print(f"\nengine.py - Time: {round(time.perf_counter() - timeStart, 3)} - {os.path.basename(pathInput)}")
 
