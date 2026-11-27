@@ -49,33 +49,49 @@ fi
 
 # Onnx
 pathModel="/home/app/onnx/model/"
-urlModel="https://huggingface.co/cimo001/paddle/resolve/main/"
+urlModel="https://huggingface.co/cimo001/"
 
 mkdir -p "${pathModel}"
 
 modelList=(
-    "PP-DocLayout_plus-L/onnx/pp-docLayout_plus-l.onnx"
-    "PP-OCRv6_medium_det/onnx/pp-ocrV6_medium_det.onnx"
-    "PP-OCRv6_medium_rec/onnx/pp-ocrV6_medium_rec.onnx"
-    "PP-OCRv6_medium_rec/onnx/dictionary.txt"
-    "PP-LCNet_x1_0_table_cls/onnx/pp-lcNet_x1_0_table_cls.onnx"
-    "RT-DETR-L_wired_table_cell_det/onnx/rt-detr-l_wired_table_cell_det.onnx"
-    "RT-DETR-L_wireless_table_cell_det/onnx/rt-detr-l_wireless_table_cell_det.onnx"
+    "paddle/PP-DocLayout_plus-L/onnx/pp-docLayout_plus-l.onnx"
+    "paddle/PP-OCRv6_medium_det/onnx/pp-ocrV6_medium_det.onnx"
+    "paddle/PP-OCRv6_medium_rec/onnx/pp-ocrV6_medium_rec.onnx"
+    "paddle/PP-OCRv6_medium_rec/onnx/dictionary.txt"
+    "paddle/RT-DETR-L_wired_table_cell_det/onnx/rt-detr-l_wired_table_cell_det.onnx"
+    "paddle/RT-DETR-L_wireless_table_cell_det/onnx/rt-detr-l_wireless_table_cell_det.onnx"
+    "paddle/PP-LCNet_x1_0_doc_ori/onnx/pp-lcNet_x1_0_doc_ori.onnx"
+    "paddle/PP-FormulaNet_plus-L/onnx/pp-formulaNet_plus-l_encoder.onnx"
+    "paddle/PP-FormulaNet_plus-L/onnx/pp-formulaNet_plus-l_decoder.onnx"
+    "paddle/PP-FormulaNet_plus-L/onnx/tokenizer.json"
+    "docling/Docling-Layout-Heron/onnx/docling-layout-heron.onnx"
+    "docling/TableFormer/onnx/tableFormer_encoder.onnx"
+    "docling/TableFormer/onnx/tableFormer_decoder.onnx"
+    "docling/TableFormer/onnx/tableFormer_box.onnx"
+    "microsoft/table-transformer-structure-recognition-v1.1-all/onnx/model.onnx"
+    "jhu-clsp/mmBERT-small/onnx/model_mask.onnx"
+    "jhu-clsp/mmBERT-small/onnx/tokenizer.json"
+    "ndl/PARSeq-tiny/onnx/parseq-tiny_30.onnx"
+    "ndl/PARSeq-tiny/onnx/parseq-tiny_50.onnx"
+    "ndl/PARSeq-tiny/onnx/parseq-tiny_100.onnx"
+    "ndl/PARSeq-tiny/onnx/dictionary.txt"
 )
 
 for model in "${modelList[@]}"
 do
-    fileName=$(basename "${model}")
+    pathLocal="${pathModel}${model/\/onnx\///}"
 
-    if [ ! -f "${pathModel}${fileName}" ]
+    if [ ! -f "${pathLocal}" ]
     then
-        echo "Download onnx: ${fileName}"
+        echo "Download onnx: ${pathLocal}"
 
-        if ! curl -fsSL "${urlModel}${model}" -o "${pathModel}${fileName}"
+        mkdir -p "$(dirname "${pathLocal}")"
+
+        if ! curl -fsSL "${urlModel}${model%%/*}/resolve/main/${model#*/}" -o "${pathLocal}"
         then
-            echo "Skip onnx - ${fileName}: download failed."
+            echo "Skip onnx - ${pathLocal}: download failed."
 
-            rm -f "${pathModel}${fileName}"
+            rm -f "${pathLocal}"
         fi
     fi
 done

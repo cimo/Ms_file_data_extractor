@@ -10,30 +10,31 @@ sys.dont_write_bytecode = True
 from helper import onnxSessionBuild, tensorNormalize
 
 class Detection:
-    def _imageResize(self, image):
+    def _startList(self, size):
+        stride = self.sizeTile - int(self.sizeTile / self.countOverlap)
+
+        return [a * stride for a in range(max(1, int(numpy.ceil((size - self.sizeTile) / stride)) + 1))]
+
+    def _probabilityBuild(self, image):
         imageHeight, imageWidth = image.shape[0:2]
 
-        ratio = 1.0
+        result = numpy.zeros((imageHeight, imageWidth), dtype=numpy.float32)
 
-        if max(imageHeight, imageWidth) > self.limitSideLength:
-            if imageHeight > imageWidth:
-                ratio = float(self.limitSideLength) / imageHeight
-            else:
-                ratio = float(self.limitSideLength) / imageWidth
+        topList = self._startList(imageHeight)
+        leftList = self._startList(imageWidth)
 
-        resizeHeight = int(imageHeight * ratio)
-        resizeWidth = int(imageWidth * ratio)
+        for a in range(len(topList)):
+            for b in range(len(leftList)):
+                imagePart = image[topList[a]:topList[a] + self.sizeTile, leftList[b]:leftList[b] + self.sizeTile]
 
-        if max(resizeHeight, resizeWidth) > self.limitSideLengthMax:
-            ratio = float(self.limitSideLengthMax) / max(resizeHeight, resizeWidth)
+                imageTile = numpy.full((self.sizeTile, self.sizeTile, 3), self.colorPad, dtype=numpy.uint8)
+                imageTile[0:imagePart.shape[0], 0:imagePart.shape[1]] = imagePart
 
-            resizeHeight = int(resizeHeight * ratio)
-            resizeWidth = int(resizeWidth * ratio)
+                probability = self.onnxSessionDetection.run(None, {"x": tensorNormalize(imageTile, self.meanList, self.standardList)})[0][0][0]
 
-        resizeHeight = max(int(round(resizeHeight / 32) * 32), 32)
-        resizeWidth = max(int(round(resizeWidth / 32) * 32), 32)
+                result[topList[a]:topList[a] + imagePart.shape[0], leftList[b]:leftList[b] + imagePart.shape[1]] = numpy.maximum(result[topList[a]:topList[a] + imagePart.shape[0], leftList[b]:leftList[b] + imagePart.shape[1]], probability[0:imagePart.shape[0], 0:imagePart.shape[1]])
 
-        return cv2.resize(image, (resizeWidth, resizeHeight))
+        return result
 
     def _boxOrder(self, contour):
         rectangle = cv2.minAreaRect(contour)
@@ -99,21 +100,14 @@ class Detection:
         resultList = []
 
         imageHeight, imageWidth = image.shape[0:2]
-        imageResized = self._imageResize(image)
 
-        tensor = tensorNormalize(imageResized, self.meanList, self.standardList)
+        probabilityMap = self._probabilityBuild(image)
 
-        tensorOutputList = self.onnxSessionDetection.run(None, {"x": tensor})
-
-        probabilityMap = tensorOutputList[0][0][0]
         bitmap = (probabilityMap > self.binaryThreshold).astype(numpy.uint8)
-
-        scaleWidth = imageWidth / float(bitmap.shape[1])
-        scaleHeight = imageHeight / float(bitmap.shape[0])
 
         contourList = cv2.findContours(bitmap * 255, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[0]
 
-        for a in range(min(len(contourList), self.candidateMax)):
+        for a in range(len(contourList)):
             pointList, sideLength = self._boxOrder(contourList[a])
 
             if sideLength < self.sideMinimum:
@@ -132,8 +126,8 @@ class Detection:
             coordinateList = []
 
             for b in range(len(pointList)):
-                x = max(0, min(int(round(pointList[b][0] * scaleWidth)), imageWidth))
-                y = max(0, min(int(round(pointList[b][1] * scaleHeight)), imageHeight))
+                x = max(0, min(int(round(pointList[b][0])), imageWidth))
+                y = max(0, min(int(round(pointList[b][1])), imageHeight))
 
                 coordinateList.append([x, y])
 
@@ -145,17 +139,16 @@ class Detection:
         return self._boxSort(resultList)
 
     def __init__(self):
-        self.pathModelDetection = f"{os.path.dirname(__file__)}/model/pp-ocrV6_medium_det.onnx"
+        self.sizeTile = 1280
+        self.countOverlap = 4
+        self.colorPad = 255
 
-        self.limitSideLength = 2000
-        self.limitSideLengthMax = 4000
         self.binaryThreshold = 0.2
         self.boxThreshold = 0.45
         self.unclipRatio = 1.4
-        self.candidateMax = 3000
         self.sideMinimum = 3
 
         self.meanList = numpy.array([0.485, 0.456, 0.406], dtype=numpy.float32)
         self.standardList = numpy.array([0.229, 0.224, 0.225], dtype=numpy.float32)
 
-        self.onnxSessionDetection = onnxSessionBuild(self.pathModelDetection)
+        self.onnxSessionDetection = onnxSessionBuild(f"{os.path.dirname(os.path.abspath(__file__))}/model/paddle/PP-OCRv6_medium_det/pp-ocrV6_medium_det.onnx")

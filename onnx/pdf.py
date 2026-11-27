@@ -1,4 +1,5 @@
 import sys
+import os
 import icu
 import fontTools.agl
 import math
@@ -8,12 +9,13 @@ import codecs
 import hashlib
 import re
 import unicodedata
+import xml.etree.ElementTree
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 sys.dont_write_bytecode = True
 
 # Source
-from helper import spacelessCheck, whitespaceCheck, boxFromPointList, characterNormalize, ideographPageResolve, gapMedianCalculate, spaceGapCheck, wideCheck
+from helper import messageEncryption, messagePasswordRequired, messagePasswordWrong, spacelessCheck, whitespaceCheck, boxFromPointList, characterNormalize, characterPrivate, blockPresentationList, ideographPageResolve, gapMedianCalculate, spaceGapCheck, spaceSkipCheck, wideCheck, levelSpaceGap
 
 def mergeText(elementList):
     resultList = []
@@ -1129,6 +1131,11 @@ class Pdf:
     def _buildPage(self):
         resultList = []
 
+        self.xfaLabelObject = {}
+        self.structObject = {}
+        self.structAnnotationObject = {}
+        self.outlineList = []
+
         trailerIndex = self.text.rfind("trailer")
 
         rootNode = None
@@ -1163,8 +1170,14 @@ class Pdf:
                 if resourceNode is not None and resourceNode.get("entryObject") is not None:
                     resourceDefaultObject = resourceNode["entryObject"]
 
+                self.xfaLabelObject = self._xfaLabelBuild(formNode["entryObject"].get("XFA"))
+
         if catalog is not None and catalog.get("entryObject") is not None:
             self._collectPage(catalog["entryObject"].get("Pages"), {"resourceObject": {}, "mediaBoxList": [0, 0, 595, 842], "cropBoxList": None, "rotate": 0}, pageRawList)
+
+            self._structBuild(catalog["entryObject"])
+
+            self.outlineList = self._outlineBuild(catalog["entryObject"], [pageRaw["number"] for pageRaw in pageRawList])
 
         for a in range(len(pageRawList)):
             pageRaw = pageRawList[a]
@@ -1184,7 +1197,16 @@ class Pdf:
 
             self._interpretContent(content, pageRaw["resourceObject"])
 
+            countContent = len(self.elementList)
+
             self._annotationInterpret(pageRaw["entryObject"], resourceDefaultObject)
+
+            mcidObject = self.structObject.get(pageRaw["number"], {})
+
+            for b in range(len(self.elementList)):
+                if self.elementList[b]["type"] != "field":
+                    self.elementList[b]["structList"] = mcidObject.get(self.elementList[b].get("mcid", -1), []) if b < countContent else []
+                    self.elementList[b]["isArtifact"] = self.elementList[b].get("isArtifact", False)
 
             elementList = self._elementTransform(self.elementList, boxList[0], pageRaw["rotate"], width, height)
 
@@ -1194,6 +1216,206 @@ class Pdf:
             resultList.append({"number": a + 1, "width": width, "height": height, "rotate": pageRaw["rotate"], "elementList": elementList})
 
         return resultList
+
+    def _xfaLabelBuild(self, node):
+        resultObject = {}
+
+        xfaNode = self._resolve(node)
+
+        if xfaNode is None:
+            return resultObject
+
+        streamList = [xfaNode]
+
+        if xfaNode["kind"] == "array" and xfaNode.get("itemList") is not None:
+            streamList = [self._resolve(xfaNode["itemList"][a]) for a in range(len(xfaNode["itemList"]))]
+
+        for a in range(len(streamList)):
+            if streamList[a] is None or streamList[a]["kind"] != "stream" or streamList[a].get("content") is None:
+                continue
+
+            content = streamList[a]["content"].strip()
+
+            if xfaNode["kind"] == "array" and content.startswith("<template") == False:
+                continue
+
+            nodeList = [itemNode for itemNode in xml.etree.ElementTree.fromstring(self._textByte(content)).iter() if itemNode.tag.split("}")[-1] == "template"]
+
+            for b in range(len(nodeList)):
+                self._xfaChildCollect(nodeList[b], "", {}, resultObject)
+
+        return resultObject
+
+    def _xfaChildCollect(self, node, path, countObject, resultObject):
+        childList = list(node)
+
+        for a in range(len(childList)):
+            tag = childList[a].tag.split("}")[-1]
+
+            if tag not in self.xfaContainerList:
+                continue
+
+            name = childList[a].get("name")
+
+            if name is None:
+                self._xfaChildCollect(childList[a], path, countObject, resultObject)
+
+                continue
+
+            countObject[name] = countObject.get(name, -1) + 1
+
+            pathChild = f"{name}[{countObject[name]}]" if path == "" else f"{path}.{name}[{countObject[name]}]"
+
+            label = self._xfaLabelText(childList[a])
+
+            if label != "":
+                resultObject[pathChild] = label
+
+            self._xfaChildCollect(childList[a], pathChild, {}, resultObject)
+
+    def _xfaLabelText(self, node):
+        childList = list(node)
+
+        for a in range(len(self.xfaLabelList)):
+            for b in range(len(childList)):
+                if childList[b].tag.split("}")[-1] != self.xfaLabelList[a][0]:
+                    continue
+
+                nodeList = [childList[b]] if self.xfaLabelList[a][1] == "" else [itemNode for itemNode in list(childList[b]) if itemNode.tag.split("}")[-1] == self.xfaLabelList[a][1]]
+
+                for c in range(len(nodeList)):
+                    label = " ".join("".join(nodeList[c].itertext()).split())
+
+                    if label != "":
+                        return label
+
+        return ""
+
+    def _structBuild(self, catalogObject):
+        self.countStruct = 0
+
+        rootNode = self._resolve(catalogObject.get("StructTreeRoot"))
+
+        if rootNode is None or rootNode.get("entryObject") is None:
+            return
+
+        roleNode = self._resolve(rootNode["entryObject"].get("RoleMap"))
+
+        self._structCollect(rootNode["entryObject"].get("K"), 0, [], roleNode["entryObject"] if roleNode is not None and roleNode.get("entryObject") is not None else {}, 0)
+
+    def _structCollect(self, node, numberPage, chainList, roleObject, level):
+        resolved = self._resolve(node)
+
+        if resolved is None or level > self.countStructLevel:
+            return
+
+        if resolved["kind"] == "number":
+            self.structObject.setdefault(numberPage, {})[int(resolved["value"])] = chainList
+
+            return
+
+        if resolved["kind"] == "array" and resolved.get("itemList") is not None:
+            for a in range(len(resolved["itemList"])):
+                self._structCollect(resolved["itemList"][a], numberPage, chainList, roleObject, level + 1)
+
+            return
+
+        if resolved.get("entryObject") is None:
+            return
+
+        entryObject = resolved["entryObject"]
+
+        pageNode = entryObject.get("Pg")
+
+        if pageNode is not None and pageNode["kind"] == "reference":
+            numberPage = pageNode["number"]
+
+        typeNode = self._resolve(entryObject.get("Type"))
+        type = typeNode["value"] if typeNode is not None and typeNode["kind"] == "name" else ""
+
+        if type == "MCR":
+            self.structObject.setdefault(numberPage, {})[int(self._nodeNumberValue(entryObject.get("MCID")))] = chainList
+
+            return
+
+        if type == "OBJR":
+            objectNode = entryObject.get("Obj")
+
+            if objectNode is not None and objectNode["kind"] == "reference":
+                self.structAnnotationObject[objectNode["number"]] = chainList
+
+            return
+
+        roleNode = self._resolve(entryObject.get("S"))
+        role = roleNode["value"] if roleNode is not None and roleNode["kind"] == "name" else ""
+
+        for a in range(self.countRoleLevel):
+            mappedNode = self._resolve(roleObject.get(role))
+
+            if mappedNode is None or mappedNode["kind"] != "name":
+                break
+
+            role = mappedNode["value"]
+
+        attributeNode = self._resolve(entryObject.get("A"))
+        attributeList = [attributeNode] if attributeNode is not None else []
+
+        if attributeNode is not None and attributeNode["kind"] == "array" and attributeNode.get("itemList") is not None:
+            attributeList = [self._resolve(attributeNode["itemList"][a]) for a in range(len(attributeNode["itemList"]))]
+
+        spanObject = {"ColSpan": 1, "RowSpan": 1}
+
+        for a in range(len(attributeList)):
+            if attributeList[a] is None or attributeList[a].get("entryObject") is None:
+                continue
+
+            for key in spanObject:
+                if attributeList[a]["entryObject"].get(key) is not None:
+                    spanObject[key] = int(self._nodeNumberValue(attributeList[a]["entryObject"].get(key)))
+
+        self.countStruct += 1
+
+        self._structCollect(entryObject.get("K"), numberPage, chainList + [{"id": self.countStruct, "role": role, "columnSpan": spanObject["ColSpan"], "rowSpan": spanObject["RowSpan"]}], roleObject, level + 1)
+
+    def _outlineBuild(self, catalogObject, numberPageList):
+        resultList = []
+
+        rootNode = self._resolve(catalogObject.get("Outlines"))
+
+        if rootNode is not None and rootNode.get("entryObject") is not None:
+            self._outlineCollect(rootNode["entryObject"].get("First"), 1, numberPageList, resultList)
+
+        return resultList
+
+    def _outlineCollect(self, node, level, numberPageList, resultList):
+        current = node
+
+        for a in range(self.countOutline):
+            resolved = self._resolve(current)
+
+            if resolved is None or resolved.get("entryObject") is None or len(resultList) >= self.countOutline:
+                break
+
+            entryObject = resolved["entryObject"]
+
+            destinationNode = self._resolve(entryObject.get("Dest"))
+
+            actionNode = self._resolve(entryObject.get("A"))
+
+            if destinationNode is None and actionNode is not None and actionNode.get("entryObject") is not None:
+                destinationNode = self._resolve(actionNode["entryObject"].get("D"))
+
+            numberPage = 0
+
+            if destinationNode is not None and destinationNode["kind"] == "array" and destinationNode.get("itemList") is not None and len(destinationNode["itemList"]) > 0 and destinationNode["itemList"][0]["kind"] == "reference" and destinationNode["itemList"][0]["number"] in numberPageList:
+                numberPage = numberPageList.index(destinationNode["itemList"][0]["number"]) + 1
+
+            resultList.append({"title": self._textString(self._resolve(entryObject.get("Title"))), "level": level, "page": numberPage})
+
+            if level < self.countStructLevel:
+                self._outlineCollect(entryObject.get("First"), level + 1, numberPageList, resultList)
+
+            current = entryObject.get("Next")
 
     def _annotationInterpret(self, entryObject, resourceDefaultObject):
         annotationNode = self._resolve(entryObject.get("Annots"))
@@ -1213,6 +1435,9 @@ class Pdf:
             appearanceNode = self._resolve(annotationObject.get("AP"))
 
             rectList = self._boxValue(annotationObject, "Rect")
+
+            if subtypeNode is not None and subtypeNode["kind"] == "name" and subtypeNode["value"] == "Widget" and rectList is not None and int(self._nodeNumberValue(annotationObject.get("F"))) & self.flagAnnotationHidden == 0:
+                self._fieldAppend(annotationObject, rectList, a + 1, self.structAnnotationObject.get(annotationNode["itemList"][a]["number"], []) if annotationNode["itemList"][a]["kind"] == "reference" else [])
 
             if subtypeNode is None or subtypeNode["kind"] != "name" or subtypeNode["value"] != "Widget" or appearanceNode is None or appearanceNode.get("entryObject") is None or rectList is None:
                 continue
@@ -1273,6 +1498,103 @@ class Pdf:
 
             for b in range(countElement, len(self.elementList)):
                 self.elementList[b]["fieldIndex"] = a + 1
+
+    def _fieldAppend(self, annotationObject, rectList, fieldIndex, structList):
+        nodeObject = {"FT": None, "Ff": None, "TU": None, "V": None, "MaxLen": None, "Opt": None}
+
+        nameList = []
+
+        entryObject = annotationObject
+
+        for a in range(self.countFieldLevel):
+            for key in nodeObject:
+                if nodeObject[key] is None:
+                    nodeObject[key] = self._resolve(entryObject.get(key))
+
+            nameNode = self._resolve(entryObject.get("T"))
+
+            if nameNode is not None:
+                nameList.insert(0, self._textString(nameNode))
+
+            parentNode = self._resolve(entryObject.get("Parent"))
+
+            if parentNode is None or parentNode.get("entryObject") is None:
+                break
+
+            entryObject = parentNode["entryObject"]
+
+        if nodeObject["FT"] is None or nodeObject["FT"]["kind"] != "name" or nodeObject["FT"]["value"] not in self.fieldKindObject:
+            return
+
+        flag = int(self._nodeNumberValue(nodeObject["Ff"]))
+
+        kind = self.fieldKindObject[nodeObject["FT"]["value"]]
+
+        if kind == "check" and flag & self.flagFieldPush != 0:
+            kind = "button"
+        elif kind == "check" and flag & self.flagFieldRadio != 0:
+            kind = "radio"
+
+        optionList = []
+
+        if nodeObject["Opt"] is not None and nodeObject["Opt"]["kind"] == "array" and nodeObject["Opt"].get("itemList") is not None:
+            for a in range(len(nodeObject["Opt"]["itemList"])):
+                optionNode = self._resolve(nodeObject["Opt"]["itemList"][a])
+
+                if optionNode is not None and optionNode["kind"] == "array" and optionNode.get("itemList") is not None and len(optionNode["itemList"]) > 1:
+                    optionNode = self._resolve(optionNode["itemList"][1])
+
+                optionList.append(self._textString(optionNode))
+
+        stateList = []
+
+        appearanceNode = self._resolve(annotationObject.get("AP"))
+
+        if appearanceNode is not None and appearanceNode.get("entryObject") is not None:
+            normalNode = self._resolve(appearanceNode["entryObject"].get("N"))
+
+            if normalNode is not None and normalNode["kind"] == "dictionary" and normalNode.get("entryObject") is not None:
+                stateList = [name for name in normalNode["entryObject"] if name != "Off"]
+
+        name = ".".join(nameList)
+
+        label = self._textString(nodeObject["TU"])
+
+        self.elementList.append({
+            "type": "field",
+            "x0": rectList[0],
+            "y0": self.pageHeight - rectList[3],
+            "x1": rectList[2],
+            "y1": self.pageHeight - rectList[1],
+            "kind": kind,
+            "name": name,
+            "label": label if label != "" else self.xfaLabelObject.get(name, ""),
+            "value": self._textString(nodeObject["V"]),
+            "state": self._textString(self._resolve(annotationObject.get("AS"))),
+            "stateList": stateList,
+            "optionList": optionList,
+            "countCharacter": int(self._nodeNumberValue(nodeObject["MaxLen"])),
+            "fieldIndex": fieldIndex,
+            "structList": structList,
+            "isArtifact": False
+        })
+
+    def _textString(self, node):
+        byteList = self._stringByte(node)
+
+        if node is not None and node["kind"] == "name":
+            byteList = self._textByte(node["value"])
+
+            if byteList.decode("utf-8", errors="ignore").encode("utf-8") == byteList:
+                return byteList.decode("utf-8")
+
+        if byteList[0:2] == b"\xfe\xff":
+            return byteList[2:].decode("utf-16-be", errors="replace")
+
+        if byteList[0:3] == b"\xef\xbb\xbf":
+            return byteList[3:].decode("utf-8", errors="replace")
+
+        return self._byteText(byteList)
 
     def _elementTransform(self, elementList, offsetX, rotate, width, height):
         for a in range(len(elementList)):
@@ -1350,6 +1672,7 @@ class Pdf:
 
             if type == "Page" or (type != "Pages" and kidsNode is None):
                 resultList.append({
+                    "number": node["number"] if node is not None and node["kind"] == "reference" else 0,
                     "entryObject": entryObject,
                     "resourceObject": inheritObject["resourceObject"],
                     "boxList": self._viewBox(inheritObject["mediaBoxList"], inheritObject["cropBoxList"]),
@@ -1408,6 +1731,7 @@ class Pdf:
         self.isPathCurve = False
         self.isPathPolygon = True
         self.pathPointList = []
+        self.pathPartList = []
 
     def _pageContent(self, entryObject):
         result = ""
@@ -1431,6 +1755,7 @@ class Pdf:
         externalObject = self._resourceExternal(resourceObject)
         stateObject = self._resourceState(resourceObject)
         colorObject = self._resourceColor(resourceObject)
+        propertyObject = self._resourceProperty(resourceObject)
 
         self.byteList = self._textByte(content)
         self.text = content
@@ -1448,7 +1773,7 @@ class Pdf:
 
             if node["kind"] == "operator":
                 if len(node["value"]) > 0:
-                    self._handleOperator(node["value"], stackList, stateObject, fontObject, externalObject, colorObject)
+                    self._handleOperator(node["value"], stackList, stateObject, fontObject, externalObject, colorObject, propertyObject)
                 else:
                     self.position += 1
 
@@ -1536,6 +1861,9 @@ class Pdf:
                 cidFontNode = self._resolve(descendantNode["itemList"][0] if len(descendantNode["itemList"]) > 0 else None)
 
                 if cidFontNode is not None and cidFontNode.get("entryObject") is not None:
+                    if len(result["toUnicodeObject"]) == 0 and codecName == "":
+                        result["toUnicodeObject"] = self._collectionUnicode(cidFontNode["entryObject"])
+
                     defaultWidthNode = self._resolve(cidFontNode["entryObject"].get("DW"))
 
                     result["defaultWidthFraction"] = defaultWidthNode["value"] / 1000 if defaultWidthNode is not None and defaultWidthNode["kind"] == "number" else 1
@@ -1565,6 +1893,29 @@ class Pdf:
         result["isWidthEstimated"] = result["isCidResolved"] == False or (len(result["widthList"]) == 0 and len(result["widthObject"]) == 0)
 
         return result
+
+    def _collectionUnicode(self, entryObject):
+        infoNode = self._resolve(entryObject.get("CIDSystemInfo"))
+
+        if infoNode is None or infoNode.get("entryObject") is None:
+            return {}
+
+        registryNode = self._resolve(infoNode["entryObject"].get("Registry"))
+        orderingNode = self._resolve(infoNode["entryObject"].get("Ordering"))
+
+        if registryNode is None or orderingNode is None:
+            return {}
+
+        name = f"{registryNode.get('value')}-{orderingNode.get('value')}-UCS2"
+
+        if name not in self.collectionNameList:
+            return {}
+
+        if name not in self.collectionObject:
+            with open(f"{self.pathCharacter}/{name}", encoding="latin-1") as file:
+                self.collectionObject[name] = self._buildToUnicode(file.read())
+
+        return self.collectionObject[name]
 
     def _encodingVerticalCheck(self, encoding, encodingNode):
         if encoding[-2:] == "-V":
@@ -1675,20 +2026,15 @@ class Pdf:
                             resultObject[code] = self._utf16Hex(itemList[c].group(1))
                             code += 1
                 else:
-                    base = int(destination.replace("<", "").replace(">", ""), 16)
+                    base = self._utf16Hex(destination.replace("<", "").replace(">", ""))
 
                     for c in range(high - low + 1):
-                        resultObject[low + c] = chr((base + c) & 0xffff)
+                        resultObject[low + c] = base[0:-1] + chr(ord(base[-1:]) + c) if base != "" else ""
 
         return resultObject
 
     def _utf16Hex(self, hexText):
-        result = ""
-
-        for a in range(0, len(hexText) - 3, 4):
-            result += chr(int(hexText[a:a + 4], 16))
-
-        return result
+        return bytes.fromhex(hexText[0:len(hexText) - len(hexText) % 4]).decode("utf-16-be", errors="ignore")
 
     def _cidWidthCollect(self, cidFontObject, nameKey, stepValue, countRange):
         resultObject = {}
@@ -1757,6 +2103,16 @@ class Pdf:
 
         for a in range(len(entryList)):
             resultObject[entryList[a]["name"]] = self._buildColorSpace(entryList[a]["resolved"])
+
+        return resultObject
+
+    def _resourceProperty(self, resourceObject):
+        resultObject = {}
+
+        entryList = self._resourceEntryCollect(resourceObject, "Properties", True)
+
+        for a in range(len(entryList)):
+            resultObject[entryList[a]["name"]] = entryList[a]["resolved"]["entryObject"]
 
         return resultObject
 
@@ -2093,7 +2449,7 @@ class Pdf:
 
         return resultObject
 
-    def _handleOperator(self, operator, stackList, stateObject, fontObject, externalObject, colorObject):
+    def _handleOperator(self, operator, stackList, stateObject, fontObject, externalObject, colorObject, propertyObject):
         def number(indexFromEnd):
             result = 0
 
@@ -2215,10 +2571,13 @@ class Pdf:
             self.strokeColor = self._colorRgb((1 - number(4)) * (1 - number(1)), (1 - number(3)) * (1 - number(1)), (1 - number(2)) * (1 - number(1)))
         elif operator == "m" or operator == "l" or operator == "c" or operator == "v" or operator == "y":
             self._pathAddPoint(number(2), number(1))
+            self._pathPartAdd(operator == "m", number(2), number(1))
 
             if operator == "c" or operator == "v" or operator == "y":
                 self.isPathCurve = True
                 self.isPathPolygon = False
+
+                self.pathPartList[len(self.pathPartList) - 1]["isCurve"] = True
             elif operator == "m" and len(self.pathPointList) > 0:
                 self.isPathPolygon = False
             else:
@@ -2232,6 +2591,10 @@ class Pdf:
 
             self._pathAddPoint(x, y)
             self._pathAddPoint(x + width, y + height)
+            self._pathPartAdd(True, x, y)
+            self._pathPartAdd(False, x + width, y + height)
+
+            self.pathPartList[len(self.pathPartList) - 1]["isRectangle"] = True
 
             self.isPathRectangle = wasEmpty
             self.isPathPolygon = False
@@ -2273,6 +2636,34 @@ class Pdf:
             self.fillColor = self._colorSpaceColor(self.fillSpace, stackList, self.fillColor)
         elif operator == "SC" or operator == "SCN":
             self.strokeColor = self._colorSpaceColor(self.strokeSpace, stackList, self.strokeColor)
+        elif operator == "BMC" or operator == "BDC":
+            self.markedList.append(self._markedBuild(stackList, propertyObject))
+        elif operator == "EMC" and len(self.markedList) > 0:
+            self._markedClose(self.markedList.pop())
+
+    def _markedBuild(self, stackList, propertyObject):
+        entryObject = {}
+
+        if len(stackList) > 1 and stackList[1]["kind"] == "name":
+            entryObject = propertyObject.get(stackList[1]["value"], {})
+        elif len(stackList) > 1 and stackList[1].get("entryObject") is not None:
+            entryObject = stackList[1]["entryObject"]
+
+        mcidNode = self._resolve(entryObject.get("MCID"))
+
+        return {
+            "tag": stackList[0]["value"] if len(stackList) > 0 and stackList[0]["kind"] == "name" else "",
+            "mcid": int(mcidNode["value"]) if mcidNode is not None and mcidNode["kind"] == "number" else -1,
+            "index": len(self.elementList)
+        }
+
+    def _markedClose(self, markedObject):
+        for a in range(markedObject["index"], len(self.elementList)):
+            if markedObject["mcid"] >= 0 and "mcid" not in self.elementList[a]:
+                self.elementList[a]["mcid"] = markedObject["mcid"]
+
+            if markedObject["tag"] == "Artifact":
+                self.elementList[a]["isArtifact"] = True
 
     def _matrixMultiply(self, rightList, leftList):
         return [
@@ -2292,7 +2683,15 @@ class Pdf:
 
         text = ""
         advanceStart = 0
+        advanceEnd = 0
         advance = 0
+
+        positionList = []
+
+        isSpace = False
+        isBlank = False
+
+        scale = self.fontSize * (1 if font["isVertical"] else self.horizontalScale)
 
         for a in range(len(partList)):
             part = partList[a]
@@ -2301,23 +2700,47 @@ class Pdf:
                 decoded = self._fontDecode(part["value"], font)
 
                 for b in range(len(decoded["charList"])):
-                    text += decoded["charList"][b]
+                    character = decoded["charList"][b]
 
-                    advance += self._glyphAdvance(font, decoded, b)["advance"]
+                    glyphAdvance = self._glyphAdvance(font, decoded, b)["advance"]
+
+                    if character != "" and character.strip() == "":
+                        isBlank = True
+                    elif character != "":
+                        if text == "":
+                            advanceStart = advance
+                        elif advance - advanceEnd >= scale * self.levelTextShift:
+                            self._textElementAppend(font, advanceStart, advanceEnd, text, positionList)
+
+                            text = ""
+                            advanceStart = advance
+
+                            positionList = []
+                        elif isBlank or (isSpace and spaceSkipCheck(text, character) == False):
+                            text += " "
+
+                            positionList.append({"text": " ", "start": advanceEnd, "end": advance})
+
+                        isSpace = False
+                        isBlank = False
+
+                        text += character
+
+                        positionList += [{"text": character[c], "start": advance + glyphAdvance * c / len(character), "end": advance + glyphAdvance * (c + 1) / len(character)} for c in range(len(character))]
+
+                    advance += glyphAdvance
+
+                    if character.strip() != "":
+                        advanceEnd = advance
             elif part["kind"] == "number":
-                scale = self.fontSize * (1 if font["isVertical"] else self.horizontalScale)
+                shift = part["value"] / 1000 * scale * (1 if font["isVertical"] else -1)
 
-                shift = -part["value"] / 1000 * scale
-
-                if shift >= scale * self.levelTextShift:
-                    self._textElementAppend(font, advanceStart, advance, text)
-
-                    text = ""
-                    advanceStart = advance + shift
+                if shift >= scale * levelSpaceGap:
+                    isSpace = True
 
                 advance += shift
 
-        self._textElementAppend(font, advanceStart, advance, text)
+        self._textElementAppend(font, advanceStart, advanceEnd, text, positionList)
 
         self._textMatrixAdvance(font, advance)
 
@@ -2337,6 +2760,7 @@ class Pdf:
         self.fillSpace = {"kind": "gray"}
         self.strokeSpace = {"kind": "gray"}
         self.currentFont = None
+        self.markedList = []
         self._pathReset()
 
     def _glyphAdvance(self, font, decoded, index):
@@ -2375,16 +2799,19 @@ class Pdf:
             self._transformPoint(renderMatrixList, start, self.textRise + self.fontSize * 0.8)
         ])
 
-    def _textElementAppend(self, font, advanceStart, advance, text):
+    def _textElementAppend(self, font, advanceStart, advance, text, positionList):
         renderMatrixList = self._matrixMultiply(self.ctmList, self.textMatrixList)
         deviceFontSize = self.fontSize * math.hypot(renderMatrixList[2], renderMatrixList[3])
 
         bboxList = self._textBoxBuild(font, renderMatrixList, advanceStart, advance)
 
         if len(text.strip()) > 0 and self.textRender != 3 and self.textRender != 7:
+            span = advance - advanceStart if advance != advanceStart else 1
+
             self.elementList.append({
                 "type": "text",
                 "text": text,
+                "positionList": [{"text": positionObject["text"], "start": (positionObject["start"] - advanceStart) / span, "end": (positionObject["end"] - advanceStart) / span} for positionObject in positionList],
                 "x0": bboxList[0],
                 "y0": self.pageHeight - bboxList[3],
                 "x1": bboxList[2],
@@ -2417,7 +2844,7 @@ class Pdf:
 
                     charList.append({"text": decoded["charList"][b], "start": start, "end": start + glyphObject["size"]})
             elif part["kind"] == "number":
-                advance -= part["value"] / 1000 * self.fontSize * (1 if font["isVertical"] else self.horizontalScale)
+                advance += part["value"] / 1000 * self.fontSize * (1 if font["isVertical"] else -self.horizontalScale)
 
         renderMatrixList = self._matrixMultiply(self.ctmList, self.textMatrixList)
         deviceFontSize = self.fontSize * math.hypot(renderMatrixList[2], renderMatrixList[3])
@@ -2539,9 +2966,9 @@ class Pdf:
                 character = font["encodingObject"].get(code)
 
             if character is None:
-                character = chr(code) if font["byteLength"] == 1 or font["isUnicodeCode"] else ""
+                character = chr(code) if font["byteLength"] == 1 or font["isUnicodeCode"] else characterPrivate
 
-            character = characterNormalize(character)
+            character = characterNormalize(character, blockPresentationList)
 
             widthFraction = font["defaultWidthFraction"]
 
@@ -2595,6 +3022,19 @@ class Pdf:
             self.pathMaxX = max(self.pathMaxX, pointList[0])
             self.pathMaxY = max(self.pathMaxY, pointList[1])
 
+    def _pathPartAdd(self, isStart, x, y):
+        pointList = self._transformPoint(self.ctmList, x, y)
+
+        if isStart or len(self.pathPartList) == 0:
+            self.pathPartList.append({"minX": pointList[0], "minY": pointList[1], "maxX": pointList[0], "maxY": pointList[1], "isCurve": False, "isRectangle": False})
+        else:
+            partObject = self.pathPartList[len(self.pathPartList) - 1]
+
+            partObject["minX"] = min(partObject["minX"], pointList[0])
+            partObject["minY"] = min(partObject["minY"], pointList[1])
+            partObject["maxX"] = max(partObject["maxX"], pointList[0])
+            partObject["maxY"] = max(partObject["maxY"], pointList[1])
+
     def _pathBoxCheck(self):
         pointList = self.pathPointList
 
@@ -2622,17 +3062,22 @@ class Pdf:
 
     def _pathPaint(self, isFill, isStroke):
         if self.isPathEmpty == False:
-            self.elementList.append({
-                "type": "rect" if self.isPathRectangle or (isStroke and isFill == False and self._pathBoxCheck()) else "path",
-                "x0": self.pathMinX,
-                "y0": self.pageHeight - self.pathMaxY,
-                "x1": self.pathMaxX,
-                "y1": self.pageHeight - self.pathMinY,
-                "color": self.fillColor if isFill else self.strokeColor,
-                "isFill": isFill,
-                "isStroke": isStroke,
-                "isCurve": self.isPathCurve
-            })
+            isRectangle = self.isPathRectangle or (isStroke and isFill == False and self._pathBoxCheck())
+
+            for a in range(len(self.pathPartList)):
+                partObject = self.pathPartList[a]
+
+                self.elementList.append({
+                    "type": "rect" if (isRectangle if len(self.pathPartList) == 1 else partObject["isRectangle"]) else "path",
+                    "x0": partObject["minX"],
+                    "y0": self.pageHeight - partObject["maxY"],
+                    "x1": partObject["maxX"],
+                    "y1": self.pageHeight - partObject["minY"],
+                    "color": self.fillColor if isFill else self.strokeColor,
+                    "isFill": isFill,
+                    "isStroke": isStroke,
+                    "isCurve": partObject["isCurve"]
+                })
 
         self._pathReset()
 
@@ -2646,7 +3091,7 @@ class Pdf:
         message = self._decryptBuild(password)
 
         if message != "":
-            return {"message": message, "pageList": []}
+            return {"message": message, "pageList": [], "outlineList": []}
 
         indirectList = self._parseIndirect()
 
@@ -2659,10 +3104,15 @@ class Pdf:
 
         ideographPageResolve(pageList)
 
-        return {"message": "", "pageList": pageList}
+        return {"message": "", "pageList": pageList, "outlineList": self.outlineList}
 
     def __init__(self, isChar):
         self.isChar = isChar
+
+        self.pathCharacter = f"{os.path.dirname(os.path.abspath(__file__))}/character"
+
+        self.collectionNameList = [name for name in os.listdir(self.pathCharacter) if name.endswith("-UCS2")]
+        self.collectionObject = {}
 
         self.delimiterSet = set(ord(value) for value in "()<>[]{}/%")
         self.whitespaceSet = set([0, 9, 10, 12, 13, 32])
@@ -2677,6 +3127,18 @@ class Pdf:
         self.levelSplit = 1.5
 
         self.flagAnnotationHidden = 2 | 32
+        self.flagFieldRadio = 1 << 15
+        self.flagFieldPush = 1 << 16
+
+        self.countFieldLevel = 32
+        self.countStructLevel = 64
+        self.countRoleLevel = 8
+        self.countOutline = 4096
+
+        self.fieldKindObject = {"Tx": "text", "Btn": "check", "Ch": "choice", "Sig": "signature"}
+
+        self.xfaContainerList = ["subform", "subformSet", "area", "exclGroup", "field"]
+        self.xfaLabelList = [["assist", "speak"], ["assist", "toolTip"], ["caption", "value"]]
 
         self.levelPathBox = 0.05
 
@@ -2686,9 +3148,9 @@ class Pdf:
 
         self.matrixXyzRgbList = [[3.1338561, -1.6168667, -0.4906146], [-0.9787684, 1.9161415, 0.0334540], [0.0719453, -0.2289914, 1.4052427]]
 
-        self.messageEncryption = "Encryption not supported."
-        self.messagePasswordRequired = "Password required."
-        self.messagePasswordWrong = "Password wrong."
+        self.messageEncryption = messageEncryption
+        self.messagePasswordRequired = messagePasswordRequired
+        self.messagePasswordWrong = messagePasswordWrong
 
         self.decryptObject = None
         self.isDecryptActive = False

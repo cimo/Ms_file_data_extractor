@@ -87,7 +87,7 @@ class Recognition:
 
             scoreList.append(float(valueList[a]))
 
-            positionList.append({"text": self.characterList[indexList[a]], "start": a * widthColumn, "end": (a + 1) * widthColumn})
+            positionList.append({"text": self.characterList[indexList[a]], "start": a * widthColumn, "end": (a + 1) * widthColumn, "alternativeList": [{"text": self.characterList[index], "probability": float(probability[a][index])} for index in sorted(numpy.flatnonzero(probability[a] >= self.levelAlternative), key=lambda index: -probability[a][index])[0:self.countAlternative] if index != 0]})
 
         score = 0.0
 
@@ -139,24 +139,29 @@ class Recognition:
 
                 imageResizedList.append(cv2.resize(imageCrop, (widthResized, self.imageHeightModel)))
 
-            tensorBatch = numpy.zeros((len(imageResizedList), 3, self.imageHeightModel, widthMax), dtype=numpy.float32)
+            widthMax = int(math.ceil(widthMax / float(self.imageWidthModel))) * self.imageWidthModel
 
-            for b in range(len(imageResizedList)):
-                tensor = imageResizedList[b].astype(numpy.float32).transpose((2, 0, 1)) / 255.0
-                tensor = (tensor - 0.5) / 0.5
+            count = max(1, int(self.sizeBatch * self.imageWidthModel / widthMax))
 
-                tensorBatch[b, :, :, 0:tensor.shape[2]] = tensor
+            for b in range(0, len(imageResizedList), count):
+                tensorBatch = numpy.zeros((count, 3, self.imageHeightModel, widthMax), dtype=numpy.float32)
 
-            tensorOutputList = self.onnxSessionRecognition.run(None, {"x": tensorBatch})
+                for c in range(len(imageResizedList[b:b + count])):
+                    tensor = imageResizedList[b + c].astype(numpy.float32).transpose((2, 0, 1)) / 255.0
+                    tensor = (tensor - 0.5) / 0.5
 
-            for b in range(len(groupList)):
-                resultList[groupList[b]] = self._textDecode(tensorOutputList[0][b], widthMax / float(tensorOutputList[0][b].shape[0]) / widthResizedList[b])
+                    tensorBatch[c, :, :, 0:tensor.shape[2]] = tensor
+
+                tensorOutputList = self.onnxSessionRecognition.run(None, {"x": tensorBatch})
+
+                for c in range(len(imageResizedList[b:b + count])):
+                    resultList[groupList[b + c]] = self._textDecode(tensorOutputList[0][c], widthMax / float(tensorOutputList[0][c].shape[0]) / widthResizedList[b + c])
 
         return resultList
 
     def __init__(self):
-        self.pathModelRecognition = f"{os.path.dirname(__file__)}/model/pp-ocrV6_medium_rec.onnx"
-        self.pathDictionary = f"{os.path.dirname(__file__)}/model/dictionary.txt"
+        self.pathModelRecognition = f"{os.path.dirname(os.path.abspath(__file__))}/model/paddle/PP-OCRv6_medium_rec/pp-ocrV6_medium_rec.onnx"
+        self.pathDictionary = f"{os.path.dirname(os.path.abspath(__file__))}/model/paddle/PP-OCRv6_medium_rec/dictionary.txt"
 
         self.imageHeightModel = 48
         self.imageWidthModel = 320
@@ -164,6 +169,9 @@ class Recognition:
 
         self.ratioRotate = 1.5
         self.sizeBatch = 16
+
+        self.countAlternative = 4
+        self.levelAlternative = 0.02
         self.levelBatchRatio = 1.25
 
         self.characterList = ["blank"]

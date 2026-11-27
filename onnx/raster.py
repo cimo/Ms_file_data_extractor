@@ -1,1063 +1,510 @@
 import sys
-import subprocess
 import cv2
+import math
+import difflib
 import numpy
 
 sys.dont_write_bytecode = True
 
 # Source
-import pdf
-from helper import boxFromPointList, centerPointCalculate, imageInkBuild, boxDebugWrite, astWrite, detectionBoxBuild, levelSpaceGap, textBullet
+import detection
+import recognition
+import vertical
+import orientation
+import watermark
+from helper import sizeDominant, ideographLocaleDetect, wideTextCheck, imageInkBuild, boxFromPointList, boxCenterInsideCheck, boxIntersection, levelRuleLength, levelSpaceChar, levelSpaceGap, levelLineOverlap, levelLineDouble
 
 class Raster:
-    def astBuild(self, pathOutput, pageObject):
-        astPage = self.layout.execute(pathOutput, pageObject["image"], pageObject["number"])
+    def _columnCheck(self, coordinateList):
+        return math.dist(coordinateList[0], coordinateList[3]) >= math.dist(coordinateList[0], coordinateList[1]) * self.recognition.ratioRotate
 
-        return {"astPage": astPage, "tablePageList": self.table.execute(astPage, pageObject["image"])}
+    def _coordinateTurn(self, coordinateList):
+        return [coordinateList[3], coordinateList[0], coordinateList[1], coordinateList[2]]
 
-    def pageAssemble(self, astPage, itemPageList, ruleList, tablePageList, pageObject, pathOutput, countTable):
-        self.layout.itemOrder(astPage, itemPageList, ruleList)
+    def _scoreFind(self, image):
+        detectionList = sorted(self.detection.execute(image), key=lambda detectionObject: max(math.dist(detectionObject["coordinate"][0], detectionObject["coordinate"][1]), math.dist(detectionObject["coordinate"][0], detectionObject["coordinate"][3])), reverse=True)[0:self.recognition.sizeBatch]
 
-        self.table.orderAssign(astPage, tablePageList)
+        coordinateList = [detectionObject["coordinate"] for detectionObject in detectionList if self._columnCheck(detectionObject["coordinate"]) == False]
 
-        self.layout.mediaWrite(astPage, pageObject["image"], pathOutput)
+        scoreList = [recognitionObject["score"] for recognitionObject in self.recognition.execute(coordinateList, image)]
 
-        self.table.cellRefine(tablePageList, itemPageList, astPage["direction"], pageObject["image"])
+        return sum(scoreList) / len(detectionList) if len(detectionList) > 0 else 0.0
 
-        self.table.textAssign(tablePageList, itemPageList, astPage["direction"])
+    def _angleFind(self, image, angleList):
+        result = 0
 
-        self.table.debugWrite(tablePageList, pageObject["image"], itemPageList, pathOutput, pageObject["number"], countTable)
+        scoreBest = self._scoreFind(image) if len(angleList) > 0 else 0.0
 
-        return self.table.resultTableBuild(tablePageList, countTable, pageObject["number"])
+        for a in range(len(angleList)):
+            score = self._scoreFind(cv2.rotate(image, self.rotateObject[angleList[a]]))
 
-    def moduleCheck(self, pageObject, tablePageList, bboxList):
-        imageHeight, imageWidth = pageObject["image"].shape[0:2]
+            if score > scoreBest:
+                result = angleList[a]
+                scoreBest = score
 
-        return self.module.pageCheck(tablePageList, imageHeight * imageWidth, bboxList)
+        return result
 
-    def moduleBuild(self, detectionList, image, watermarkObject, numberPage, countStart, pathOutput):
-        resultObject = self.module.itemImageBuild(detectionList, image, self.ocr.recognition, watermarkObject, numberPage)
+    def _uprightFind(self, image):
+        angle = self.orientation.execute(image)
 
-        itemList = []
-        bboxDebugList = []
+        return self._angleFind(image, self.angleColumnList if angle in self.angleColumnList else [angleItem for angleItem in [angle] if angleItem in self.rotateObject])
 
-        for a in range(len(resultObject["itemList"])):
-            bboxList = [int(round(value)) for value in resultObject["itemList"][a]["bbox"]]
+    def _uprightBuild(self, image, angle):
+        return cv2.rotate(image, self.rotateObject[angle]) if angle in self.rotateObject else image
 
-            itemList.append({
-                "id": countStart + len(itemList) + 1,
-                "page": numberPage,
-                "bbox": bboxList,
-                "centerPoint": centerPointCalculate(bboxList),
-                "text": resultObject["itemList"][a]["text"]
-            })
-
-            bboxDebugList.append(bboxList)
-
-        if self.isDebug:
-            boxDebugWrite(image, bboxDebugList, f"{pathOutput}debug/ocr/{numberPage}.jpg")
-
-        return {"itemList": itemList, "text": self.module.execute(resultObject["itemList"], resultObject["ringList"], resultObject["lineObject"], [], numberPage)}
-
-    def watermarkApply(self, pageObject, pathOutput):
-        detectionList = self.ocr.boxDetect(pageObject["image"])
-
-        watermarkObject = self.watermark.execute(detectionBoxBuild(detectionList), pageObject["image"])
-
-        if not watermarkObject["isFound"]:
-            return {"detectionList": detectionList, "watermarkObject": watermarkObject}
-
-        image = watermarkObject["image"]
-
-        if self.isDebug:
-            imageDebug = pageObject["image"].copy()
-            imageDebug[watermarkObject["zone"] > 0] = (imageDebug[watermarkObject["zone"] > 0] * 0.5 + numpy.array([0, 0, 255]) * 0.5).astype(numpy.uint8)
-
-            cv2.imwrite(f"{pathOutput}debug/watermark/{pageObject['number']}_zone.jpg", imageDebug)
-            cv2.imwrite(f"{pathOutput}debug/watermark/{pageObject['number']}.jpg", image)
-
-        mergeObject = self.watermark.detectionMerge(detectionList, watermarkObject["zone"], self.ocr.boxDetect(image), self.ocr.recognition, image)
-
-        return {"detectionList": detectionList, "watermarkObject": {"isFound": True, "image": image, "isKeepList": mergeObject["isKeepList"], "detectionZoneList": mergeObject["detectionZoneList"]}}
-
-    def detectionCheckList(self, detectionList, watermarkObject):
-        if not watermarkObject["isFound"]:
-            return detectionBoxBuild(detectionList)
-
-        resultList = []
+    def _skewFind(self, detectionList):
+        angleList = []
 
         for a in range(len(detectionList)):
-            if watermarkObject["isKeepList"][a]:
-                resultList.append(boxFromPointList(detectionList[a]["coordinate"]))
+            coordinateList = detectionList[a]["coordinate"]
 
-        return resultList + detectionBoxBuild(watermarkObject["detectionZoneList"])
+            width = math.dist(coordinateList[0], coordinateList[1])
 
-    def itemOcrBuild(self, pageObject, pathOutput, tablePageList, countStart, moduleList):
-        ocrObject = self.watermarkApply(pageObject, pathOutput)
+            if width >= math.dist(coordinateList[0], coordinateList[3]) * levelLineDouble:
+                angleList += [math.atan2(coordinateList[1][1] - coordinateList[0][1], coordinateList[1][0] - coordinateList[0][0])] * int(width)
 
-        if self.moduleCheck(pageObject, tablePageList, self.detectionCheckList(ocrObject["detectionList"], ocrObject["watermarkObject"])):
-            moduleObject = self.moduleBuild(ocrObject["detectionList"], pageObject["image"], ocrObject["watermarkObject"], pageObject["number"], countStart, pathOutput)
+        angleList.sort()
 
-            moduleList.append({"page": pageObject["number"], "text": moduleObject["text"]})
+        return angleList[int(len(angleList) / 2)] if len(angleList) > 0 else 0.0
 
-            return moduleObject["itemList"]
+    def _sizeMedian(self, detectionList):
+        sizeList = sorted(min(math.dist(detectionObject["coordinate"][0], detectionObject["coordinate"][1]), math.dist(detectionObject["coordinate"][0], detectionObject["coordinate"][3])) for detectionObject in detectionList)
 
-        return self.ocr.execute(ocrObject["detectionList"], pageObject["image"], tablePageList, ocrObject["watermarkObject"], countStart, pageObject["number"], pathOutput)
+        return sizeList[int(len(sizeList) / 2)]
 
-    def ruleImageBuild(self, image):
-        imageWidth = image.shape[1]
+    def _skewBuild(self, image, angle):
+        imageHeight, imageWidth = image.shape[0:2]
 
-        imageRule = cv2.morphologyEx(imageInkBuild(image), cv2.MORPH_OPEN, numpy.ones((1, max(1, int(imageWidth * self.levelRuleImage))), numpy.uint8))
+        matrix = cv2.getRotationMatrix2D((imageWidth / 2, imageHeight / 2), math.degrees(angle), 1.0)
 
-        count, _, statList, _ = cv2.connectedComponentsWithStats(imageRule)
+        width = int(imageHeight * abs(matrix[0][1]) + imageWidth * abs(matrix[0][0]))
+        height = int(imageHeight * abs(matrix[0][0]) + imageWidth * abs(matrix[0][1]))
 
+        matrix[0][2] += (width - imageWidth) / 2
+        matrix[1][2] += (height - imageHeight) / 2
+
+        return cv2.warpAffine(image, matrix, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+    def _quadList(self, detectionList, image):
+        watermarkObject = self.watermark.execute([boxFromPointList(detectionObject["coordinate"]) for detectionObject in detectionList], image)
+
+        if watermarkObject["isFound"] == False:
+            return [{"coordinate": detectionObject["coordinate"], "image": image, "isColumn": False, "isTurn": False} for detectionObject in detectionList]
+
+        mergeObject = self.watermark.detectionMerge(detectionList, watermarkObject["zone"], self.detection.execute(watermarkObject["image"]), self.recognition, watermarkObject["image"])
+
+        return [{"coordinate": detectionList[a]["coordinate"], "image": image, "isColumn": False, "isTurn": False} for a in range(len(detectionList)) if mergeObject["isKeepList"][a]] + [{"coordinate": detectionObject["coordinate"], "image": watermarkObject["image"], "isColumn": False, "isTurn": False} for detectionObject in mergeObject["detectionZoneList"]]
+
+    def _turnCheck(self, quadList, image):
+        quadLineList = sorted([quadObject for quadObject in quadList if quadObject["image"] is image and self._columnCheck(quadObject["coordinate"]) == False], key=lambda quadObject: math.dist(quadObject["coordinate"][0], quadObject["coordinate"][1]), reverse=True)[0:self.recognition.sizeBatch]
+
+        coordinateList = []
+
+        for a in range(len(quadLineList)):
+            pointList = numpy.array(quadLineList[a]["coordinate"], dtype=numpy.float64)
+
+            side = pointList[3] - pointList[0]
+
+            length = math.dist(pointList[0], pointList[1])
+            thickness = math.dist(pointList[0], pointList[3])
+
+            step = (pointList[1] - pointList[0]) / length * thickness
+
+            for b in range(int(length / thickness)):
+                start = pointList[0] + step * b
+
+                coordinateList.append([start, start + step, start + step + side, start + side])
+
+        count = len(coordinateList)
+
+        scoreList = [recognitionObject["score"] for recognitionObject in self.recognition.execute(coordinateList + [self._coordinateTurn(coordinate) for coordinate in coordinateList], image)]
+
+        return len([a for a in range(count) if scoreList[count + a] > scoreList[a]]) * 2 > count
+
+    def _textRecognize(self, quadList, image, isColumn):
+        indexList = [a for a in range(len(quadList)) if quadList[a]["image"] is image and quadList[a]["isColumn"] == isColumn]
+
+        reader = self.vertical if isColumn else self.recognition
+
+        recognitionList = reader.execute([quadList[index]["coordinate"] for index in indexList], image) if len(indexList) > 0 else []
+
+        for a in range(len(indexList)):
+            quadList[indexList[a]]["text"] = recognitionList[a]["text"]
+            quadList[indexList[a]]["score"] = recognitionList[a]["score"]
+            quadList[indexList[a]]["positionList"] = recognitionList[a]["positionList"]
+
+    def _turnResolve(self, quadList, image):
+        indexList = [a for a in range(len(quadList)) if quadList[a]["image"] is image and self._columnCheck(self._coordinateTurn(quadList[a]["coordinate"])) == False]
+
+        coordinateList = [self._coordinateTurn(quadList[index]["coordinate"]) for index in indexList]
+
+        recognitionList = self.recognition.execute(coordinateList, image)
+
+        for a in range(len(indexList)):
+            if recognitionList[a]["score"] > quadList[indexList[a]]["score"]:
+                quadList[indexList[a]]["coordinate"] = coordinateList[a]
+                quadList[indexList[a]]["text"] = recognitionList[a]["text"]
+                quadList[indexList[a]]["score"] = recognitionList[a]["score"]
+                quadList[indexList[a]]["positionList"] = recognitionList[a]["positionList"]
+                quadList[indexList[a]]["isTurn"] = True
+
+    def _columnResolve(self, quadList, isTurn):
+        isLocale = ideographLocaleDetect("".join(quadObject["text"] for quadObject in quadList)) == self.vertical.locale
+
+        for a in range(len(quadList)):
+            quadList[a]["isColumn"] = isLocale and len(quadList[a]["text"]) > 1 and wideTextCheck(quadList[a]["text"]) and quadList[a]["isTurn"] == False and self._columnCheck(quadList[a]["coordinate"]) != isTurn
+
+    def _rubyResolve(self, quadList):
+        boxList = [boxFromPointList(quadObject["coordinate"]) for quadObject in quadList]
+
+        for a in range(len(quadList)):
+            thickness = boxList[a][3] - boxList[a][1]
+
+            for b in range(len(quadList)):
+                overlap = min(boxList[a][2], boxList[b][2]) - max(boxList[a][0], boxList[b][0])
+
+                isSide = boxList[a][1] + boxList[a][3] < boxList[b][1] + boxList[b][3] and boxList[a][3] - boxList[b][1] > thickness * levelSpaceGap
+
+                if quadList[a]["isTurn"] == False and quadList[b]["isTurn"] == False and thickness <= (boxList[b][3] - boxList[b][1]) * self.levelRuby and overlap >= (boxList[a][2] - boxList[a][0]) * levelLineOverlap and isSide:
+                    quadList[a]["text"] = ""
+                    quadList[a]["positionList"] = []
+                    quadList[a]["isColumn"] = False
+
+    def _columnTrust(self, quadList):
+        for a in range(len(quadList)):
+            if quadList[a]["isColumn"] and quadList[a]["score"] < self.watermark.levelScore:
+                quadList[a]["text"] = ""
+                quadList[a]["positionList"] = []
+
+    def _characterSpanList(self, wordList):
         resultList = []
 
-        for a in range(1, count):
-            x, y, width, height = statList[a][0:4]
+        centerList = [(characterObject["start"] + characterObject["end"]) / 2 for characterObject in wordList]
 
-            centerY = int(y + height / 2)
+        for a in range(len(wordList)):
+            start = (centerList[a - 1] + centerList[a]) / 2 if a > 0 else wordList[a]["start"]
+            end = (centerList[a] + centerList[a + 1]) / 2 if a < len(wordList) - 1 else wordList[a]["end"]
 
-            resultList.append([int(x), centerY, int(x + width), centerY])
+            resultList.append({"text": wordList[a]["text"], "start": min(1.0, start), "end": min(1.0, end)})
 
         return resultList
 
-    def documentBuild(self, astPageList, pathOutput, countPage, tableList, itemList, moduleList):
-        self.layout.flowAssign(astPageList)
+    def _boxBetweenCheck(self, boxList, start, end):
+        return len([boxObject for boxObject in boxList if boxObject["bbox"][0] >= start and boxObject["bbox"][2] <= end]) > 0
 
-        layoutList = []
+    def _wordList(self, quadObject, scale, boxList):
+        resultList = []
 
-        for a in range(len(astPageList)):
-            layoutList = layoutList + self.layout.resultLayoutBuild(astPageList[a], len(layoutList))
+        bboxList = [value / scale for value in boxFromPointList(quadObject["coordinate"])]
 
-        if self.isDebug:
-            astWrite(pathOutput, astPageList)
+        width = bboxList[2] - bboxList[0]
+        height = bboxList[3] - bboxList[1]
 
-        return {
-            "pageCount": countPage,
-            "directionList": self.layout.directionBuild(astPageList),
-            "layoutList": layoutList,
-            "tableList": tableList,
-            "itemList": itemList,
-            "moduleList": moduleList
-        }
-
-    def __init__(self, isDebug, layout, table, ocr, module, watermark):
-        self.isDebug = isDebug
-
-        self.layout = layout
-        self.table = table
-        self.ocr = ocr
-        self.module = module
-        self.watermark = watermark
-
-        self.levelRuleImage = 0.25
-
-        self.image = Raster.Image(self)
-        self.pdf = Raster.Pdf(self)
-
-    class Image:
-        def _pageImageBuild(self, pathInput, pathOutput):
-            image = cv2.imread(pathInput)
-
-            if image is None:
-                return []
-
-            if self.raster.isDebug:
-                cv2.imwrite(f"{pathOutput}debug/page/{self.numberPageFirst}.jpg", image)
-
-            return [{"number": self.numberPageFirst, "image": image}]
-
-        def execute(self, pathInput, pathOutput, job):
-            pageList = self._pageImageBuild(pathInput, pathOutput)
-
-            astPageList = []
-            tableList = []
-            itemList = []
-            moduleList = []
-
-            for a in range(len(pageList)):
-                if job["isCancel"]:
-                    return {"message": "Job cancelled."}
-
-                astObject = self.raster.astBuild(pathOutput, pageList[a])
-
-                astPageList.append(astObject["astPage"])
-
-                if job["isCancel"]:
-                    return {"message": "Job cancelled."}
-
-                itemPageList = self.raster.itemOcrBuild(pageList[a], pathOutput, astObject["tablePageList"], len(itemList), moduleList)
-
-                if job["isCancel"]:
-                    return {"message": "Job cancelled."}
-
-                tableList = tableList + self.raster.pageAssemble(astObject["astPage"], itemPageList, self.raster.ruleImageBuild(pageList[a]["image"]), astObject["tablePageList"], pageList[a], pathOutput, len(tableList))
-                itemList = itemList + itemPageList
-
-            return self.raster.documentBuild(astPageList, pathOutput, len(pageList), tableList, itemList, moduleList)
-
-        def __init__(self, raster):
-            self.numberPageFirst = 1
-
-            self.raster = raster
-
-    class Pdf:
-        def _pagePdfBuild(self, password, pathInput, pathOutput):
-            argumentList = ["pdftoppm", "-jpeg", "-cropbox", "-r", self.resolution]
-
-            if len(password) > 0:
-                argumentList = argumentList + ["-upw", password, "-opw", password]
-
-            runObject = subprocess.run(argumentList + [pathInput], capture_output=True)
-
-            if runObject.returncode != 0:
-                print(f"raster.py - pdftoppm - {runObject.stderr.decode('utf-8', 'replace').strip()}")
-
-                return []
-
-            byteFileList = self._pageStreamSplit(runObject.stdout)
-
-            resultList = []
-
-            for a in range(len(byteFileList)):
-                numberPage = a + 1
-
-                if self.raster.isDebug:
-                    with open(f"{pathOutput}debug/page/{numberPage}.jpg", "wb") as file:
-                        file.write(byteFileList[a])
-
-                resultList.append({"number": numberPage, "byte": byteFileList[a]})
-
+        if quadObject["text"].strip() == "":
             return resultList
 
-        def _modulePdfBuild(self, pageObject, pageCharObject):
-            numberPage = pageObject["number"]
+        if quadObject["isTurn"] or height >= width * self.recognition.ratioRotate:
+            return [{"bbox": bboxList, "text": quadObject["text"].strip(), "size": width, "angle": self.angleTurn if quadObject["isTurn"] else 0, "isVertical": quadObject["isTurn"] == False and len(quadObject["text"].strip()) > 1, "fieldIndex": -1, "alternativeList": [[] for a in range(len(quadObject["text"].strip()))]}]
 
-            scale = pageObject["image"].shape[1] / pageCharObject["width"]
+        boxLineList = [boxObject for boxObject in boxList if boxCenterInsideCheck(boxObject["bbox"], bboxList)]
 
-            itemModuleList = self.raster.module.itemPdfBuild(pageCharObject["elementList"], scale, numberPage)
+        positionList = quadObject["positionList"] + [{"text": " ", "start": 1.0, "end": 1.0}]
 
-            detectionList = self.raster.ocr.boxDetect(pageObject["image"])
+        wordList = []
+        phraseList = []
 
-            ringList = self.raster.module.ringBuild(pageObject["image"], detectionList)
+        for a in range(len(positionList)):
+            isSplit = len(wordList) > 0 and (((positionList[a]["start"] + positionList[a]["end"]) / 2 - (wordList[len(wordList) - 1]["start"] + wordList[len(wordList) - 1]["end"]) / 2) * width >= height * (1 + levelSpaceChar) or self._boxBetweenCheck(boxLineList, bboxList[0] + width * wordList[len(wordList) - 1]["end"], bboxList[0] + width * positionList[a]["start"]))
 
-            lineObject = self.raster.module.lineBuild(pageObject["image"], detectionList)
+            if positionList[a]["text"] != " " and isSplit == False:
+                wordList.append(positionList[a])
 
-            circleList = self.raster.module.circleBuild(detectionList, pageCharObject["elementList"], scale)
+                continue
 
-            return self.raster.module.execute(itemModuleList, ringList, lineObject, circleList, numberPage)
+            if len(wordList) == 0:
+                continue
 
-        def _pageCharCollect(self, password, pathInput):
-            pageList = self.raster.module.pdfParse(pathInput, password)["pageList"]
+            wordObject = {"start": min(1.0, wordList[0]["start"]), "end": min(1.0, wordList[len(wordList) - 1]["end"]), "text": "".join(characterObject["text"] for characterObject in wordList), "alternativeList": [characterObject["alternativeList"] for characterObject in wordList], "positionList": self._characterSpanList(wordList)}
 
-            resultObject = {}
+            if len(phraseList) > 0 and (wordObject["start"] - phraseList[len(phraseList) - 1]["end"]) * width < height * levelSpaceChar and self._boxBetweenCheck(boxLineList, bboxList[0] + width * phraseList[len(phraseList) - 1]["end"], bboxList[0] + width * wordObject["start"]) == False:
+                phraseList[len(phraseList) - 1]["positionList"] += [{"text": " ", "start": phraseList[len(phraseList) - 1]["end"], "end": wordObject["start"]}] + wordObject["positionList"]
+                phraseList[len(phraseList) - 1]["end"] = wordObject["end"]
+                phraseList[len(phraseList) - 1]["text"] += f" {wordObject['text']}"
+                phraseList[len(phraseList) - 1]["alternativeList"] += [[]] + wordObject["alternativeList"]
+            else:
+                phraseList.append(wordObject)
 
-            for a in range(len(pageList)):
-                resultObject[pageList[a]["number"]] = pageList[a]
+            wordList = [positionList[a]] if positionList[a]["text"] != " " else []
 
-            return resultObject
+        for a in range(len(phraseList)):
+            widthPhrase = phraseList[a]["end"] - phraseList[a]["start"]
 
-        def _pageStreamSplit(self, byteList):
-            markerStart = b"\xff\xd8\xff"
+            resultList.append({"bbox": [bboxList[0] + width * phraseList[a]["start"], bboxList[1], bboxList[0] + width * phraseList[a]["end"], bboxList[3]], "text": phraseList[a]["text"], "size": height, "angle": 0, "isVertical": False, "fieldIndex": -1, "alternativeList": phraseList[a]["alternativeList"], "positionList": [{"text": positionObject["text"], "start": (positionObject["start"] - phraseList[a]["start"]) / widthPhrase if widthPhrase > 0 else 0.0, "end": (positionObject["end"] - phraseList[a]["start"]) / widthPhrase if widthPhrase > 0 else 1.0} for positionObject in phraseList[a]["positionList"]]})
 
-            resultList = []
+        return resultList
 
-            position = byteList.find(markerStart)
+    def _borderSize(self, imageInk, x, y, stepX, stepY, limit):
+        result = 0
 
-            while position >= 0:
-                positionNext = byteList.find(markerStart, position + len(markerStart))
+        for a in range(limit):
+            if x < 0 or y < 0 or x >= imageInk.shape[1] or y >= imageInk.shape[0] or imageInk[y][x] == 0:
+                break
 
-                resultList.append(byteList[position:positionNext] if positionNext >= 0 else byteList[position:])
+            result += 1
 
-                position = positionNext
+            x += stepX
+            y += stepY
 
-            return resultList
+        return result
 
-        def _boldFind(self, element):
-            partList = element["fontPartList"] if "fontPartList" in element else [[element["fontName"], len(element["text"])]]
+    def _voidList(self, imageInk, imageBorder):
+        resultList = []
 
-            count = 0
-            countBold = 0
+        contourList, hierarchyList = cv2.findContours(imageInk, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
-            for a in range(len(partList)):
-                if partList[a][0] == "":
-                    continue
+        for a in range(len(contourList)):
+            x, y, width, height = cv2.boundingRect(contourList[a])
 
-                count += partList[a][1]
+            index = hierarchyList[0][a][3]
 
-                if self.labelBold in partList[a][0].casefold():
-                    countBold += partList[a][1]
+            if index != -1 and cv2.contourArea(contourList[a]) >= (width - 1) * (height - 1) * (1 - levelSpaceGap):
+                limit = min(width, height)
 
-            if count == 0:
-                return None
+                left = self._borderSize(imageBorder, x - 1, y + int(height / 2), -1, 0, limit)
+                right = self._borderSize(imageBorder, x + width, y + int(height / 2), 1, 0, limit)
+                top = self._borderSize(imageBorder, x + int(width / 2), y - 1, 0, -1, limit)
+                bottom = self._borderSize(imageBorder, x + int(width / 2), y + height, 0, 1, limit)
 
-            return countBold * 2 > count
+                xOuter, yOuter, widthOuter, heightOuter = cv2.boundingRect(contourList[index])
 
-        def _itemBuild(self, pageReader, image, countStart, numberPage):
-            if pageReader is None or pageReader["width"] == 0 or pageReader["height"] == 0:
-                return []
+                resultList.append({"bbox": [x - left, y - top, x + width + right, y + height + bottom], "bboxOuter": [xOuter, yOuter, xOuter + widthOuter, yOuter + heightOuter], "center": [x + int(width / 2), y + int(height / 2)], "border": max(left, right, top, bottom)})
 
-            imageHeight, imageWidth = image.shape[0:2]
+        return resultList
 
-            scaleX = imageWidth / pageReader["width"]
-            scaleY = imageHeight / pageReader["height"]
+    def _characterPointList(self, quadList):
+        resultList = []
 
-            elementSplitObject = self._rotateSplit(self._widthCorrect(pageReader["elementList"], image, pageReader["rotate"], scaleX, scaleY))
+        for a in range(len(quadList)):
+            pointList = numpy.array(quadList[a]["coordinate"], dtype=numpy.float64)
 
-            elementList = pdf.mergeText(self._bulletMark(elementSplitObject["elementList"]))
+            pointStart = (pointList[0] + pointList[3]) / 2
+            pointEnd = (pointList[1] + pointList[2]) / 2
 
-            resultList = []
+            if self._columnCheck(quadList[a]["coordinate"]):
+                pointStart = (pointList[0] + pointList[1]) / 2
+                pointEnd = (pointList[3] + pointList[2]) / 2
 
-            for a in range(len(elementList)):
-                if elementList[a]["type"] != "text":
-                    continue
+            for b in range(len(quadList[a]["positionList"])):
+                positionObject = quadList[a]["positionList"][b]
 
-                bboxList = [
-                    int(round(elementList[a]["x0"] * scaleX)),
-                    int(round(elementList[a]["y0"] * scaleY)),
-                    int(round(elementList[a]["x1"] * scaleX)),
-                    int(round(elementList[a]["y1"] * scaleY))
-                ]
+                if positionObject["text"] != " ":
+                    resultList.append(pointStart + (pointEnd - pointStart) * (positionObject["start"] + positionObject["end"]) / 2)
 
-                resultList.append({
-                    "id": countStart + len(resultList) + 1,
-                    "page": numberPage,
-                    "bbox": bboxList,
-                    "centerPoint": centerPointCalculate(bboxList),
-                    "text": elementList[a]["text"],
-                    "fontSize": elementList[a]["fontSize"],
-                    "isBold": self._boldFind(elementList[a])
-                })
+        return resultList
 
-            resultList = self.raster.module.optionTextApply(resultList, pageReader["elementList"], scaleX) + self._rotateBuild(elementSplitObject["rotateList"], scaleX, scaleY, numberPage)
+    def _shapeList(self, image, detectionList, scale, quadList):
+        resultList = []
+        boxList = []
 
-            for a in range(len(resultList)):
-                resultList[a]["id"] = countStart + a + 1
+        imageInk = imageInkBuild(image)
 
-            return resultList
+        imageBorder = imageInk.copy()
 
-        def _figureRelabel(self, astPage, pageReader, image):
-            if pageReader is None or pageReader["width"] == 0 or pageReader["height"] == 0:
-                return
+        length = max(3, int(round(self._sizeMedian(detectionList) * levelRuleLength)))
 
-            imageHeight, imageWidth = image.shape[0:2]
+        for kernel in [numpy.ones((1, length), numpy.uint8), numpy.ones((length, 1), numpy.uint8)]:
+            count, _, statList, _ = cv2.connectedComponentsWithStats(cv2.morphologyEx(imageInk, cv2.MORPH_OPEN, kernel))
 
-            scaleX = imageWidth / pageReader["width"]
-            scaleY = imageHeight / pageReader["height"]
+            for a in range(1, count):
+                x, y, width, height = statList[a][0:4]
 
-            elementList = pageReader["elementList"]
+                resultList.append({"bbox": [x / scale, y / scale, (x + width) / scale, (y + height) / scale], "isCurve": False})
 
-            itemList = astPage["itemList"]
+        for a in range(len(detectionList)):
+            cv2.fillPoly(imageInk, [numpy.array(detectionList[a]["coordinate"], dtype=numpy.int32)], 0)
 
-            for a in range(len(itemList)):
-                if itemList[a]["label"] not in self.raster.layout.labelFigureList:
-                    continue
+        voidList = self._voidList(imageInk, imageBorder)
 
-                bboxList = [max(0, int(itemList[a]["bbox"][0])), max(0, int(itemList[a]["bbox"][1])), min(imageWidth, int(itemList[a]["bbox"][2])), min(imageHeight, int(itemList[a]["bbox"][3]))]
+        pointList = self._characterPointList(quadList)
 
-                width = bboxList[2] - bboxList[0]
-                height = bboxList[3] - bboxList[1]
+        centerList = [voidObject["center"] for voidObject in voidList]
 
-                if width <= 0 or height <= 0:
-                    continue
+        quadBoxList = [boxFromPointList(quadObject["coordinate"]) for quadObject in quadList]
 
-                maskFree = numpy.ones((height, width), dtype=bool)
+        voidTextList = self._voidList(imageBorder, imageBorder)
 
-                countText = 0
+        for a in range(len(voidTextList)):
+            bboxList = voidTextList[a]["bbox"]
 
-                isFigure = False
+            if voidTextList[a]["center"] in centerList or max(abs(voidTextList[a]["bboxOuter"][b] - bboxList[b]) for b in range(4)) > voidTextList[a]["border"]:
+                continue
 
-                for b in range(len(elementList)):
-                    element = elementList[b]
+            sizeLineList = [min(quadBox[2] - quadBox[0], quadBox[3] - quadBox[1]) for quadBox in quadBoxList if boxIntersection(quadBox, bboxList) > 0]
 
-                    x0 = max(bboxList[0], int(element["x0"] * scaleX))
-                    y0 = max(bboxList[1], int(element["y0"] * scaleY))
-                    x1 = min(bboxList[2], int(element["x1"] * scaleX) + 1)
-                    y1 = min(bboxList[3], int(element["y1"] * scaleY) + 1)
+            if len(sizeLineList) == 0 or min(bboxList[2] - bboxList[0], bboxList[3] - bboxList[1]) < max(sizeLineList) * levelLineOverlap:
+                continue
 
-                    if x1 <= x0 or y1 <= y0:
-                        continue
+            if len([point for point in pointList if point[0] >= bboxList[0] and point[0] <= bboxList[2] and point[1] >= bboxList[1] and point[1] <= bboxList[3]]) == 0:
+                boxList.append({"bbox": [value / scale for value in bboxList], "isCurve": False})
 
-                    if element["type"] == "text":
-                        countText += 1
+        for a in range(len(voidList)):
+            resultList.append({"bbox": [value / scale for value in voidList[a]["bbox"]], "isCurve": False})
 
-                        maskFree[y0 - bboxList[1]:y1 - bboxList[1], x0 - bboxList[0]:x1 - bboxList[0]] = False
-                    elif element["type"] == "image" and (x1 - x0) * (y1 - y0) >= width * height * self.levelFigureImage:
-                        isFigure = True
+        return {"shapeList": resultList + boxList, "boxList": boxList}
 
-                        break
+    def zoneExecute(self, bboxList, scale, image):
+        resultList = []
 
-                if isFigure or countText == 0:
-                    continue
+        left = max(0, int(bboxList[0] * scale))
+        top = max(0, int(bboxList[1] * scale))
 
-                crop = image[bboxList[1]:bboxList[3], bboxList[0]:bboxList[2]].astype(numpy.float32)
+        imageZone = image[top:int(bboxList[3] * scale), left:int(bboxList[2] * scale)]
 
-                maskInk = (crop.max(axis=2) + crop.min(axis=2)) / 510 < self.levelFigureLight
+        quadList = [{"coordinate": detectionObject["coordinate"], "image": imageZone, "isColumn": False, "isTurn": False} for detectionObject in self.detection.execute(imageZone)]
 
-                if numpy.count_nonzero(maskInk & maskFree) < max(1, numpy.count_nonzero(maskFree)) * self.levelFigureInk:
-                    itemList[a]["label"] = self.labelText
+        self._textRecognize(quadList, imageZone, False)
 
-        def _rotateSplit(self, elementList):
-            resultList = []
-            rotateList = []
+        for a in range(len(quadList)):
+            wordList = self._wordList(quadList[a], scale, []) if quadList[a]["score"] >= self.watermark.levelScore else []
 
-            for a in range(len(elementList)):
-                if elementList[a]["type"] == "text" and elementList[a]["isVertical"] == False and elementList[a]["angle"] in self.angleRotateList:
-                    rotateList.append(elementList[a])
-                else:
-                    resultList.append(elementList[a])
+            for b in range(len(wordList)):
+                bboxWordList = wordList[b]["bbox"]
 
-            return {"elementList": resultList, "rotateList": rotateList}
+                wordList[b]["bbox"] = [bboxWordList[0] + left / scale, bboxWordList[1] + top / scale, bboxWordList[2] + left / scale, bboxWordList[3] + top / scale]
 
-        def _rotateBuild(self, rotateList, scaleX, scaleY, numberPage):
-            lineList = []
+            resultList += wordList
 
-            for a in range(len(rotateList)):
-                element = rotateList[a]
+        return resultList
 
-                lineObject = None
+    def _textMerge(self, quadObject, recognitionObject):
+        positionList = list(recognitionObject["positionList"])
 
-                for b in range(len(lineList)):
-                    if lineList[b]["angle"] != element["angle"]:
-                        continue
+        opcodeList = difflib.SequenceMatcher(None, quadObject["text"], recognitionObject["text"], autojunk=False).get_opcodes()
 
-                    overlap = min(lineList[b]["x1"], element["x1"]) - max(lineList[b]["x0"], element["x0"])
+        for a in range(len(opcodeList)):
+            if opcodeList[a][0] == "delete":
+                positionList += [positionObject for positionObject in quadObject["positionList"][opcodeList[a][1]:opcodeList[a][2]] if positionObject["text"] != " "]
 
-                    if overlap >= min(lineList[b]["x1"] - lineList[b]["x0"], element["x1"] - element["x0"]) * self.levelBoxElementOverlap:
-                        lineObject = lineList[b]
+        positionList.sort(key=lambda positionObject: positionObject["start"] + positionObject["end"])
 
-                        break
+        quadObject["text"] = "".join(positionObject["text"] for positionObject in positionList)
+        quadObject["score"] = recognitionObject["score"]
+        quadObject["positionList"] = positionList
 
-                if lineObject == None:
-                    lineList.append({"angle": element["angle"], "x0": element["x0"], "y0": element["y0"], "x1": element["x1"], "y1": element["y1"], "elementList": [element]})
+    def textExecute(self, imageLarge, rasterObject, scale):
+        imageLarge = self._uprightBuild(imageLarge, rasterObject["angleUpright"])
 
-                    continue
+        if rasterObject["isSkew"]:
+            imageLarge = self._skewBuild(imageLarge, rasterObject["angleSkew"])
 
-                lineObject["x0"] = min(lineObject["x0"], element["x0"])
-                lineObject["y0"] = min(lineObject["y0"], element["y0"])
-                lineObject["x1"] = max(lineObject["x1"], element["x1"])
-                lineObject["y1"] = max(lineObject["y1"], element["y1"])
+        ratio = imageLarge.shape[1] / rasterObject["widthText"]
 
-                lineObject["elementList"].append(element)
+        quadList = [quadObject for quadObject in rasterObject["quadList"] if quadObject["isPage"] and quadObject["isColumn"] == False]
 
-            lineList.sort(key=lambda lineObject: (lineObject["angle"], lineObject["x0"] if lineObject["angle"] == 90 else -lineObject["x1"]))
+        recognitionList = self.recognition.execute([[[point[0] * ratio, point[1] * ratio] for point in quadObject["coordinate"]] for quadObject in quadList], imageLarge)
 
-            resultList = []
+        for a in range(len(quadList)):
+            self._textMerge(quadList[a], recognitionList[a])
 
-            for a in range(len(lineList)):
-                lineObject = lineList[a]
+        pageObject = rasterObject["pageObject"]
 
-                isUp = lineObject["angle"] == 90
+        pageObject["textList"] = []
 
-                elementLineList = sorted(lineObject["elementList"], key=lambda elementObject: -elementObject["y1"] if isUp else elementObject["y0"])
+        for a in range(len(rasterObject["quadList"])):
+            pageObject["textList"] += self._wordList(rasterObject["quadList"][a], scale * rasterObject["factor"], rasterObject["boxList"])
 
-                text = ""
+        pageObject["size"] = sizeDominant(pageObject["textList"]) if len(pageObject["textList"]) > 0 else 0
 
-                for b in range(len(elementLineList)):
-                    textElement = elementLineList[b]["text"].strip()
+    def execute(self, image, scale):
+        angleUpright = self._uprightFind(image)
 
-                    if b > 0:
-                        gap = elementLineList[b - 1]["y0"] - elementLineList[b]["y1"] if isUp else elementLineList[b]["y0"] - elementLineList[b - 1]["y1"]
+        image = self._uprightBuild(image, angleUpright)
 
-                        if gap > elementLineList[b]["fontSize"] * levelSpaceGap:
-                            text += " "
+        detectionList = self.detection.execute(image)
 
-                    text += textElement
+        if len([detectionObject for detectionObject in detectionList if self._columnCheck(detectionObject["coordinate"])]) * 2 > len(detectionList):
+            angleColumn = self._angleFind(image, self.angleColumnList)
 
-                size = lineObject["elementList"][0]["fontSize"]
+            image = self._uprightBuild(image, angleColumn)
 
-                bboxList = [
-                    int(round(lineObject["x0"] * scaleX)),
-                    int(round(lineObject["y0"] * scaleY)),
-                    int(round(lineObject["x1"] * scaleX)),
-                    int(round(lineObject["y1"] * scaleY))
-                ]
+            angleUpright = (angleUpright + angleColumn) % 360
 
-                itemPrevious = resultList[len(resultList) - 1] if len(resultList) > 0 else None
+            detectionList = self.detection.execute(image) if angleColumn != 0 else detectionList
 
-                if itemPrevious != None and itemPrevious["angle"] == lineObject["angle"] and max(lineObject["x0"] - itemPrevious["edge"], itemPrevious["edgeStart"] - lineObject["x1"]) <= size * self.levelRotateLine and min(itemPrevious["bbox"][3], bboxList[3]) > max(itemPrevious["bbox"][1], bboxList[1]):
-                    itemPrevious["text"] = f"{itemPrevious['text']} {text}"
-                    itemPrevious["bbox"] = [min(itemPrevious["bbox"][0], bboxList[0]), min(itemPrevious["bbox"][1], bboxList[1]), max(itemPrevious["bbox"][2], bboxList[2]), max(itemPrevious["bbox"][3], bboxList[3])]
-                    itemPrevious["centerPoint"] = centerPointCalculate(itemPrevious["bbox"])
-                    itemPrevious["edge"] = max(itemPrevious["edge"], lineObject["x1"])
-                    itemPrevious["edgeStart"] = min(itemPrevious["edgeStart"], lineObject["x0"])
+        pageObject = {"size": 0, "textList": [], "fieldList": [], "shapeList": [], "ruleList": []}
 
-                    continue
+        if len(detectionList) == 0:
+            return {"image": image, "pageObject": pageObject, "sizeLine": 0}
 
-                resultList.append({
-                    "id": 0,
-                    "page": numberPage,
-                    "bbox": bboxList,
-                    "centerPoint": centerPointCalculate(bboxList),
-                    "text": text,
-                    "fontSize": size,
-                    "isBold": None,
-                    "isRotate": True,
-                    "angle": lineObject["angle"],
-                    "edge": lineObject["x1"],
-                    "edgeStart": lineObject["x0"]
-                })
+        angle = self._skewFind(detectionList)
 
-            for a in range(len(resultList)):
-                del resultList[a]["angle"]
-                del resultList[a]["edge"]
-                del resultList[a]["edgeStart"]
+        isSkew = abs(math.tan(angle)) * image.shape[1] > self._sizeMedian(detectionList) * levelLineOverlap
 
-            return resultList
+        if isSkew:
+            image = self._skewBuild(image, angle)
 
-        def _ruleSplit(self, elementList):
-            horizontalList = []
-            verticalList = []
+            detectionList = self.detection.execute(image)
 
-            for a in range(len(elementList)):
-                element = elementList[a]
+        sizeLine = self._sizeMedian(detectionList)
 
-                if element["type"] not in self.typeRuleList or element["isCurve"]:
-                    continue
+        factor = max(1.0, self.sizeText / sizeLine)
 
-                width = element["x1"] - element["x0"]
-                height = element["y1"] - element["y0"]
+        imageText = image
 
-                if height <= self.levelRuleTouch and width > self.levelRuleTouch:
-                    horizontalList.append(element)
-                elif width <= self.levelRuleTouch and height > self.levelRuleTouch:
-                    verticalList.append(element)
-                elif element["type"] == "rect" and element["isStroke"] and width > self.levelRuleTouch and height > self.levelRuleTouch:
-                    horizontalList.append({"x0": element["x0"], "y0": element["y0"], "x1": element["x1"], "y1": element["y0"]})
-                    horizontalList.append({"x0": element["x0"], "y0": element["y1"], "x1": element["x1"], "y1": element["y1"]})
-                    verticalList.append({"x0": element["x0"], "y0": element["y0"], "x1": element["x0"], "y1": element["y1"]})
-                    verticalList.append({"x0": element["x1"], "y0": element["y0"], "x1": element["x1"], "y1": element["y1"]})
+        if factor > 1.0:
+            imageText = cv2.resize(image, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
 
-            horizontalList = sorted(horizontalList, key=lambda element: element["x0"])
+            detectionList = self.detection.execute(imageText)
 
-            mergeList = []
+        quadList = self._quadList(detectionList, imageText)
 
-            for a in range(len(horizontalList)):
-                horizontal = horizontalList[a]
+        isTurn = angleUpright in self.angleColumnList and self._turnCheck(quadList, imageText)
 
-                centerY = (horizontal["y0"] + horizontal["y1"]) / 2
+        imageList = [imageText] + [quadObject["image"] for quadObject in quadList if quadObject["image"] is not imageText][0:1]
 
-                index = -1
+        for a in range(len(imageList)):
+            self._textRecognize(quadList, imageList[a], False)
 
-                for b in range(len(mergeList)):
-                    if abs(mergeList[b]["y"] - centerY) <= self.levelRuleTouch and horizontal["x0"] <= mergeList[b]["x1"] + self.levelRuleTouch:
-                        index = b
+        if isTurn:
+            self._turnResolve(quadList, imageText)
 
-                if index < 0:
-                    mergeList.append({"x0": horizontal["x0"], "x1": horizontal["x1"], "y": centerY})
-                else:
-                    mergeList[index]["x1"] = max(mergeList[index]["x1"], horizontal["x1"])
+        self._columnResolve(quadList, isTurn)
 
-            return {"horizontalList": mergeList, "verticalList": verticalList}
+        if isTurn:
+            self._rubyResolve(quadList)
 
-        def _ruleHorizontalBuild(self, pageReader, image):
-            imageHeight, imageWidth = image.shape[0:2]
+        for a in range(len(imageList)):
+            self._textRecognize(quadList, imageList[a], True)
 
-            scaleX = imageWidth / pageReader["width"]
-            scaleY = imageHeight / pageReader["height"]
+        self._columnTrust(quadList)
 
-            horizontalList = self._ruleSplit(pageReader["elementList"])["horizontalList"]
+        for a in range(len(quadList)):
+            quadList[a]["isPage"] = quadList[a]["image"] is imageText
 
-            resultList = []
+        resultShapeObject = self._shapeList(imageText, detectionList, scale * factor, quadList)
 
-            for a in range(len(horizontalList)):
-                y = int(round(horizontalList[a]["y"] * scaleY))
+        pageObject["shapeList"] = resultShapeObject["shapeList"]
+        pageObject["ruleList"] = [shapeObject for shapeObject in pageObject["shapeList"] if min(shapeObject["bbox"][2] - shapeObject["bbox"][0], shapeObject["bbox"][3] - shapeObject["bbox"][1]) < max(shapeObject["bbox"][2] - shapeObject["bbox"][0], shapeObject["bbox"][3] - shapeObject["bbox"][1]) * levelSpaceGap]
 
-                resultList.append([int(round(horizontalList[a]["x0"] * scaleX)), y, int(round(horizontalList[a]["x1"] * scaleX)), y])
+        for a in range(len(quadList)):
+            pageObject["textList"] += self._wordList(quadList[a], scale * factor, resultShapeObject["boxList"])
 
-            return resultList
+        pageObject["size"] = sizeDominant(pageObject["textList"]) if len(pageObject["textList"]) > 0 else 0
 
-        def _fieldRuleCollect(self, elementList, scaleX, scaleY):
-            ruleObject = self._ruleSplit(elementList)
+        return {"image": image, "pageObject": pageObject, "sizeLine": sizeLine, "angleUpright": angleUpright, "isSkew": isSkew, "angleSkew": angle, "factor": factor, "widthText": imageText.shape[1], "quadList": quadList, "boxList": resultShapeObject["boxList"], "isTurn": isTurn}
 
-            horizontalList = ruleObject["horizontalList"]
-            verticalList = ruleObject["verticalList"]
+    def __init__(self):
+        self.detection = detection.Detection()
+        self.recognition = recognition.Recognition()
+        self.vertical = vertical.Vertical()
+        self.orientation = orientation.Orientation()
+        self.watermark = watermark.Watermark()
 
-            resultList = []
+        self.sizeText = self.recognition.imageHeightModel / 2
 
-            for a in range(len(horizontalList)):
-                horizontal = horizontalList[a]
+        self.rotateObject = {90: cv2.ROTATE_90_COUNTERCLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_CLOCKWISE}
 
-                top = horizontal["y"]
+        self.levelRuby = 0.6
 
-                positionList = []
-
-                isStart = False
-                isEnd = False
-
-                for b in range(len(verticalList)):
-                    vertical = verticalList[b]
-
-                    if abs(vertical["y1"] - horizontal["y"]) > self.levelRuleTouch or vertical["x0"] < horizontal["x0"] - self.levelRuleTouch or vertical["x1"] > horizontal["x1"] + self.levelRuleTouch:
-                        continue
-
-                    positionList.append(vertical["x0"])
-
-                    top = min(top, vertical["y0"])
-
-                    if abs(vertical["x0"] - horizontal["x0"]) <= self.levelRuleTouch:
-                        isStart = True
-
-                    if abs(vertical["x1"] - horizontal["x1"]) <= self.levelRuleTouch:
-                        isEnd = True
-
-                if len(positionList) < self.countFieldRule or isStart == False or isEnd == False:
-                    continue
-
-                positionList = sorted(positionList)
-
-                isCell = True
-
-                for b in range(1, len(positionList)):
-                    if positionList[b] - positionList[b - 1] > (horizontal["y"] - top) * self.levelFieldCell:
-                        isCell = False
-
-                if isCell:
-                    resultList.append([horizontal["x0"] * scaleX, top * scaleY, horizontal["x1"] * scaleX, horizontal["y"] * scaleY])
-
-            return resultList
-
-        def _fieldLabelAboveFind(self, top, bboxList, skipList, itemList):
-            result = None
-
-            for a in range(len(itemList)):
-                bboxItemList = itemList[a]["bbox"]
-
-                height = bboxItemList[3] - bboxItemList[1]
-
-                if itemList[a] in skipList or bboxItemList[3] > top + height * self.levelCaptionOverlap or top - bboxItemList[3] > height * self.levelCaptionGap:
-                    continue
-
-                if bboxItemList[0] < bboxList[0] - height or bboxItemList[0] > bboxList[2]:
-                    continue
-
-                if result == None or bboxItemList[3] > result["bbox"][3]:
-                    result = itemList[a]
-
-            return result
-
-        def _lineParagraphCheck(self, itemObject, itemList):
-            bboxList = itemObject["bbox"]
-
-            height = bboxList[3] - bboxList[1]
-
-            for a in range(len(itemList)):
-                bboxOtherList = itemList[a]["bbox"]
-
-                if itemList[a] is itemObject or itemList[a]["fontSize"] != itemObject["fontSize"] or bboxOtherList[0] >= bboxList[2] or bboxOtherList[2] <= bboxList[0]:
-                    continue
-
-                if (bboxOtherList[1] >= bboxList[3] and bboxOtherList[1] - bboxList[3] < height) or (bboxOtherList[3] <= bboxList[1] and bboxList[1] - bboxOtherList[3] < height):
-                    return True
-
-            return False
-
-        def _fieldValueCollect(self, bboxList, itemList):
-            resultList = []
-
-            for a in range(len(itemList)):
-                bboxItemList = itemList[a]["bbox"]
-
-                centerX = (bboxItemList[0] + bboxItemList[2]) / 2
-                centerY = (bboxItemList[1] + bboxItemList[3]) / 2
-
-                if centerX > bboxList[0] and centerX < bboxList[2] and centerY > bboxList[1] and centerY < bboxList[3]:
-                    resultList.append(itemList[a])
-
-            for a in range(len(resultList)):
-                if resultList[a]["bbox"][1] >= resultList[0]["bbox"][3] or resultList[a]["bbox"][3] <= resultList[0]["bbox"][1]:
-                    return []
-
-            return sorted(resultList, key=lambda itemObject: itemObject["bbox"][0])
-
-        def _fieldAttach(self, image, pageReader, itemList, countStart):
-            imageHeight, imageWidth = image.shape[0:2]
-
-            fieldList = self._fieldRuleCollect(pageReader["elementList"], imageWidth / pageReader["width"], imageHeight / pageReader["height"])
-
-            itemUprightList = []
-
-            for a in range(len(itemList)):
-                if "isRotate" not in itemList[a]:
-                    itemUprightList.append(itemList[a])
-
-            removeList = []
-
-            for a in range(len(fieldList)):
-                bboxList = fieldList[a]
-
-                itemLabel = None
-
-                captionList = []
-
-                top = bboxList[1]
-
-                for b in range(len(itemUprightList)):
-                    bboxItemList = itemUprightList[b]["bbox"]
-
-                    height = bboxItemList[3] - bboxItemList[1]
-
-                    centerX = (bboxItemList[0] + bboxItemList[2]) / 2
-                    centerY = (bboxItemList[1] + bboxItemList[3]) / 2
-
-                    if itemUprightList[b] in removeList:
-                        continue
-
-                    if centerX > bboxList[0] and centerX < bboxList[2] and centerY < bboxList[1] and bboxItemList[3] > bboxList[1] - height:
-                        captionList.append(itemUprightList[b])
-
-                        top = min(top, bboxItemList[1])
-
-                        continue
-
-                    gap = bboxList[0] - bboxItemList[2]
-
-                    if gap < 0 or bboxItemList[1] >= bboxList[3] or bboxItemList[3] + height <= bboxList[3] or self._lineParagraphCheck(itemUprightList[b], itemUprightList):
-                        continue
-
-                    if itemLabel == None or bboxItemList[2] > itemLabel["bbox"][2]:
-                        itemLabel = itemUprightList[b]
-
-                valueList = self._fieldValueCollect(bboxList, itemUprightList)
-
-                if len(captionList) == 0 and len(valueList) == 0:
-                    continue
-
-                if itemLabel == None:
-                    itemLabel = self._fieldLabelAboveFind(top, bboxList, captionList + valueList, itemUprightList)
-
-                isCaption = itemLabel != None and len(captionList) > 0
-
-                for b in range(len(captionList)):
-                    if isCaption and captionList[b]["fontSize"] >= itemLabel["fontSize"]:
-                        isCaption = False
-
-                textValue = "".join(["".join(itemObject["text"].split()) for itemObject in valueList])
-
-                if isCaption:
-                    captionList = sorted(captionList, key=lambda itemObject: itemObject["bbox"][0])
-
-                    itemLabel["text"] = f"{itemLabel['text']} ({' '.join([itemObject['text'] for itemObject in captionList])})"
-                    itemLabel["isField"] = True
-
-                    removeList = removeList + captionList
-
-                if len(valueList) == 0:
-                    continue
-
-                if itemLabel == None:
-                    valueList[0]["text"] = textValue
-                    valueList[0]["bbox"][2] = valueList[len(valueList) - 1]["bbox"][2]
-                    valueList[0]["centerPoint"] = centerPointCalculate(valueList[0]["bbox"])
-                else:
-                    itemLabel["text"] = f"{itemLabel['text']} {textValue}"
-                    itemLabel["isField"] = True
-
-                    removeList.append(valueList[0])
-
-                removeList = removeList + valueList[1:]
-
-            resultList = []
-
-            for a in range(len(itemList)):
-                if itemList[a] not in removeList:
-                    itemList[a]["id"] = countStart + len(resultList) + 1
-
-                    resultList.append(itemList[a])
-
-            return resultList
-
-        def _bulletMark(self, elementList):
-            textList = []
-            bulletList = []
-
-            for a in range(len(elementList)):
-                if elementList[a]["type"] == "text":
-                    if elementList[a]["isVertical"] == False:
-                        textList.append(elementList[a])
-
-                    continue
-
-                if elementList[a]["type"] == "path" and elementList[a]["isFill"]:
-                    bulletList.append(elementList[a])
-
-            matchList = []
-
-            for a in range(len(bulletList)):
-                textObject = self._bulletTextFind(bulletList[a], textList)
-
-                if textObject != None:
-                    matchList.append({"bullet": bulletList[a], "text": textObject})
-
-            for a in range(len(matchList)):
-                count = 0
-
-                isAlone = True
-
-                for b in range(len(matchList)):
-                    if abs(matchList[a]["bullet"]["x0"] - matchList[b]["bullet"]["x0"]) <= matchList[a]["text"]["fontSize"] * self.levelBulletSize:
-                        count += 1
-
-                    if matchList[b]["text"] is matchList[a]["text"] and (matchList[b]["bullet"]["x1"] <= matchList[a]["bullet"]["x0"] or matchList[b]["bullet"]["x0"] >= matchList[a]["bullet"]["x1"]):
-                        isAlone = False
-
-                if count >= self.countBullet and isAlone:
-                    matchList[a]["text"]["text"] = f"{textBullet}{matchList[a]['text']['text']}"
-
-            return elementList
-
-        def _bulletTextFind(self, bulletObject, textList):
-            centerY = (bulletObject["y0"] + bulletObject["y1"]) / 2
-
-            width = bulletObject["x1"] - bulletObject["x0"]
-            height = bulletObject["y1"] - bulletObject["y0"]
-
-            result = None
-
-            for a in range(len(textList)):
-                if centerY < textList[a]["y0"] or centerY > textList[a]["y1"]:
-                    continue
-
-                size = textList[a]["fontSize"]
-
-                if width > size * self.levelBulletSize or height > size * self.levelBulletSize:
-                    continue
-
-                if textList[a]["x0"] < bulletObject["x1"]:
-                    return None
-
-                if textList[a]["x0"] - bulletObject["x1"] > size * self.levelBulletGap:
-                    continue
-
-                if result == None or textList[a]["x0"] < result["x0"]:
-                    result = textList[a]
-
-            return result
-
-        def _widthCorrect(self, elementList, image, rotate, scaleX, scaleY):
-            isRotate = rotate == 90 or rotate == 270
-
-            elementEstimatedList = []
-
-            for a in range(len(elementList)):
-                if elementList[a]["type"] != "text" or elementList[a]["isWidthEstimated"] == False:
-                    continue
-
-                elementEstimatedList.append({"element": elementList[a], "isVertical": elementList[a]["isVertical"] != isRotate})
-
-            if len(elementEstimatedList) == 0:
-                return elementList
-
-            imageInk = imageInkBuild(image)
-
-            boxList = self._boxDetectionCollect(image, imageInk)
-
-            for a in range(len(boxList)):
-                for b in range(len(self.axisList)):
-                    isVertical = self.axisList[b]
-
-                    nameFlow = "y" if isVertical else "x"
-                    nameCross = "x" if isVertical else "y"
-
-                    scaleFlow = scaleY if isVertical else scaleX
-                    scaleCross = scaleX if isVertical else scaleY
-
-                    groupList = self._groupCollect(elementEstimatedList, boxList[a], isVertical, nameFlow, nameCross, scaleFlow, scaleCross)
-
-                    if len(groupList) == 0:
-                        continue
-
-                    flowStart = groupList[0][f"{nameFlow}0"]
-                    flowEnd = groupList[len(groupList) - 1][f"{nameFlow}1"]
-
-                    edge = self._inkEdge(imageInk, boxList[a], isVertical) / scaleFlow
-
-                    if flowEnd <= flowStart or edge <= flowStart:
-                        continue
-
-                    ratio = (edge - flowStart) / (flowEnd - flowStart)
-
-                    for c in range(len(groupList)):
-                        groupList[c][f"{nameFlow}1"] = groupList[c][f"{nameFlow}0"] + (groupList[c][f"{nameFlow}1"] - groupList[c][f"{nameFlow}0"]) * ratio
-
-            return elementList
-
-        def _groupCollect(self, elementEstimatedList, boxObject, isVertical, nameFlow, nameCross, scaleFlow, scaleCross):
-            resultList = []
-
-            for a in range(len(elementEstimatedList)):
-                if elementEstimatedList[a]["isVertical"] != isVertical:
-                    continue
-
-                element = elementEstimatedList[a]["element"]
-
-                cross1 = max(element[f"{nameCross}0"] * scaleCross, boxObject[f"{nameCross}0"])
-                cross2 = min(element[f"{nameCross}1"] * scaleCross, boxObject[f"{nameCross}1"])
-
-                if cross2 - cross1 < (element[f"{nameCross}1"] - element[f"{nameCross}0"]) * scaleCross * self.levelBoxElementOverlap:
-                    continue
-
-                flowStart = element[f"{nameFlow}0"] * scaleFlow
-
-                if flowStart < boxObject[f"{nameFlow}0"] or flowStart > boxObject[f"{nameFlow}1"]:
-                    continue
-
-                resultList.append(element)
-
-            resultList.sort(key=lambda elementObject: elementObject[f"{nameFlow}0"])
-
-            return resultList
-
-        def _boxDetectionCollect(self, image, imageInk):
-            detectionList = self.raster.ocr.boxDetect(image)
-
-            resultList = []
-
-            for a in range(len(detectionList)):
-                bboxList = boxFromPointList(detectionList[a]["coordinate"])
-
-                x0 = max(0, bboxList[0])
-                y0 = max(0, bboxList[1])
-                x1 = min(imageInk.shape[1], bboxList[2])
-                y1 = min(imageInk.shape[0], bboxList[3])
-
-                if x1 <= x0 or y1 <= y0:
-                    continue
-
-                resultList.append({"x0": x0, "y0": y0, "x1": x1, "y1": y1})
-
-            return resultList
-
-        def _inkEdge(self, imageInk, boxObject, isVertical):
-            region = imageInk[boxObject["y0"]:boxObject["y1"], boxObject["x0"]:boxObject["x1"]]
-
-            valueList = region.sum(axis=1) if isVertical else region.sum(axis=0)
-
-            start = boxObject["y0"] if isVertical else boxObject["x0"]
-
-            for a in range(len(valueList) - 1, -1, -1):
-                if valueList[a] > 0:
-                    return start + a + 1
-
-            return start
-
-        def _debugWrite(self, itemList, image, pathOutput, numberPage):
-            if self.raster.isDebug == False:
-                return
-
-            bboxList = []
-
-            for a in range(len(itemList)):
-                bboxList.append(itemList[a]["bbox"])
-
-            boxDebugWrite(image, bboxList, f"{pathOutput}debug/ocr/{numberPage}.jpg")
-
-        def _pageReaderCollect(self, pageReaderList, countPage):
-            if len(pageReaderList) != countPage:
-                print(f"raster.py - page count - raster {countPage}, text {len(pageReaderList)}")
-
-            resultObject = {}
-
-            for a in range(len(pageReaderList)):
-                resultObject[pageReaderList[a]["number"]] = pageReaderList[a]
-
-            return resultObject
-
-        def execute(self, password, pathInput, pathOutput, job):
-            pageList = self._pagePdfBuild(password, pathInput, pathOutput)
-
-            if job["isCancel"]:
-                return {"message": "Job cancelled."}
-
-            pdfObject = pdf.Pdf(False).execute(pathInput, password)
-
-            if pdfObject["message"] != "":
-                return {"message": pdfObject["message"]}
-
-            pageReaderObject = self._pageReaderCollect(pdfObject["pageList"], len(pageList))
-
-            astPageList = []
-            tableList = []
-            itemList = []
-            moduleList = []
-
-            pageCharObject = None
-
-            for a in range(len(pageList)):
-                if job["isCancel"]:
-                    return {"message": "Job cancelled."}
-
-                pageObject = {"number": pageList[a]["number"], "image": cv2.imdecode(numpy.frombuffer(pageList[a]["byte"], dtype=numpy.uint8), cv2.IMREAD_COLOR)}
-
-                astObject = self.raster.astBuild(pathOutput, pageObject)
-
-                astPageList.append(astObject["astPage"])
-
-                if job["isCancel"]:
-                    return {"message": "Job cancelled."}
-
-                numberPage = pageObject["number"]
-
-                itemPageList = self._itemBuild(pageReaderObject[numberPage] if numberPage in pageReaderObject else None, pageObject["image"], len(itemList), numberPage)
-
-                ruleList = []
-
-                if len(itemPageList) == 0:
-                    itemPageList = self.raster.itemOcrBuild(pageObject, pathOutput, astObject["tablePageList"], len(itemList), moduleList)
-
-                    ruleList = self.raster.ruleImageBuild(pageObject["image"])
-                else:
-                    ruleList = self._ruleHorizontalBuild(pageReaderObject[numberPage], pageObject["image"])
-
-                    self._figureRelabel(astObject["astPage"], pageReaderObject[numberPage], pageObject["image"])
-
-                    self._debugWrite(itemPageList, pageObject["image"], pathOutput, numberPage)
-
-                    bboxList = []
-
-                    for b in range(len(itemPageList)):
-                        bboxList.append(itemPageList[b]["bbox"])
-
-                    if self.raster.moduleCheck(pageObject, astObject["tablePageList"], bboxList):
-                        if pageCharObject == None:
-                            pageCharObject = self._pageCharCollect(password, pathInput)
-
-                        moduleList.append({"page": numberPage, "text": self._modulePdfBuild(pageObject, pageCharObject[numberPage])})
-                    else:
-                        itemPageList = self._fieldAttach(pageObject["image"], pageReaderObject[numberPage], itemPageList, len(itemList))
-
-                if job["isCancel"]:
-                    return {"message": "Job cancelled."}
-
-                tableList = tableList + self.raster.pageAssemble(astObject["astPage"], itemPageList, ruleList, astObject["tablePageList"], pageObject, pathOutput, len(tableList))
-                itemList = itemList + itemPageList
-
-            return self.raster.documentBuild(astPageList, pathOutput, len(pageList), tableList, itemList, moduleList)
-
-        def __init__(self, raster):
-            self.resolution = "300"
-
-            self.levelBoxElementOverlap = 0.5
-            self.levelBulletSize = 0.6
-            self.levelBulletGap = 3.0
-            self.levelFigureImage = 0.5
-            self.levelFigureInk = 0.1
-            self.levelFigureLight = 0.7
-            self.levelRotateLine = 1.5
-            self.levelRuleTouch = 1.0
-            self.levelCaptionGap = 2.0
-            self.levelCaptionOverlap = 0.5
-            self.levelFieldCell = 1.5
-
-            self.countBullet = 2
-            self.countFieldRule = 3
-
-            self.labelBold = "bold"
-            self.labelText = "text"
-
-            self.axisList = [False, True]
-            self.angleRotateList = [90, 270]
-            self.typeRuleList = ["path", "rect"]
-
-            self.raster = raster
+        self.angleColumnList = [90, 270]
+        self.angleTurn = 90
