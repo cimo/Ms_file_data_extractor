@@ -114,14 +114,22 @@ export default class Service {
                     const pathInputBasename = `${helperSrc.PATH_ROOT}${helperSrc.PATH_FILE}input/${uniqueId}/`;
                     const pathOutput = `${helperSrc.PATH_ROOT}${helperSrc.PATH_FILE}output/${uniqueId}/`;
 
-                    if (this.cq.checkOwner(owner)) {
-                        helperSrc.responseBody({ state: "ko", message: "Only one request at a time is allowed." }, response, 200);
+                    let messageOwner = "";
+
+                    if (owner === "") {
+                        messageOwner = "Parameter 'owner' is missing.";
+                    } else if (this.cq.checkOwner(owner)) {
+                        messageOwner = "Only one request at a time is allowed.";
+                    }
+
+                    if (messageOwner !== "") {
+                        helperSrc.responseBody({ state: "ko", message: messageOwner }, response, 200);
 
                         const fileOrFolderDeleteInput = await helperSrc.fileOrFolderDelete(pathInputBasename);
 
                         if (typeof fileOrFolderDeleteInput !== "boolean") {
                             helperSrc.writeLog(
-                                "Service.ts - api() - post(/api/extract) - checkOwner() - fileOrFolderDelete()",
+                                "Service.ts - api() - post(/api/extract) - messageOwner - fileOrFolderDelete()",
                                 fileOrFolderDeleteInput.toString()
                             );
                         }
