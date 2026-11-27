@@ -69,7 +69,8 @@ RUN cd ~ \
     && VERSION_CODENAME=$(grep VERSION_CODENAME= /etc/os-release | cut -d= -f2) \
     && find /usr/local/share/ca-certificates/ -type d -exec chmod 755 {} + \
     && find /usr/local/share/ca-certificates/ -type f -exec chmod 644 {} + \
-    && apt-get update && apt-get install -y ca-certificates tzdata curl media-types jq gettext-base \
+    && apt-get update && LANG=C.UTF-8 apt-get install -y locales ca-certificates tzdata curl media-types jq gettext-base \
+    && locale-gen "${LANG}" \
     && update-ca-certificates \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && echo ${TZ} > /etc/timezone \
     && echo "text/typescript ts" >> /etc/mime.types \
